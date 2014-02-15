@@ -1,0 +1,36 @@
+笔记
+
+所有不是cons对象的东西,就是一个原子(atom),判断atom可以这样定义: (defun out-atom (x) (not (consp x)))
+
+nil既是一个原子,也是一个列表.
+
+(eql (cons 'a nil) (cons 'a nil)) 结果为NIL.因为每次调用cons,lisp都会分配一块新的内存给两个指针.所以,即使相同参数,调用cons两次,得到的也是不同的对象.
+
+而想要比较内容相等,可以使用equal函数. (equal (cons 'a nil) (cons 'a nil))  返回T
+
+关于lisp中的指针.其实可以类比地这么看lisp中的变量.lisp中变量其实就是指针.比如,把一个list结构赋值给某个变量,就是把该结构的指针赋值给某个变量.所以对于beginner而言,就可以认为lisp中的变量就是指针.当然,出于优化考虑,比如存储比指针内存占用小的整形数值,可能会直接赋值给变量,而不是指针.这些行为都是lisp在后台处理了的.
+从这点出发,lisp中的一个基本要点是,它允许程序员把任何东西放在任何地方.
+
+
+nth和nthcdr函数都是从0开始索引的(zero-indexed),即元素从0开始编号,而不是从1开始.应该说在common lisp里,跟在C里一样,都是从0开始编号.
+
+last函数是返回列表的最后一个Cons对象,即(last '(a b c)) 返回(C). 而如果需要获得最后一个元素,需要(car (last '(a b c)))
+
+映射函数(Mapping Functions) 指对一个列表里的元素做函数调用.最常使用的是mapcar,接受一个函数以及一个或多个列表,并返回把函数应用至每个列表的元素的结果,直到有的列表没有元素为止.
+(mapcar #'(lambda (x) (+ x 10)) '(1 2 3)) 输出结果为(11 12 13)
+(mapcar #'list '(a b c) '(1 2 3 4)) 输出结果为((A 1) (B 2) (C 3))
+(maplist #'(lambda (x) x) '(a b c)) 输出结果为((A B C) (B C) (C))
+
+树结构. Cons对象可以看成是二叉树,car代表左子树而cdr代表右子树.树相关的函数有如下. 一般操作树的方法为,car和cdr同时递归,这种函数被称为双重递归.
+copy-tree 接受一个树并返回一个副本.
+subst     替换树之中的元素
+
+关键字参数: 个人理解,关键字参数就类似C语言里面的函数指针.用我们自己定义的函数替换掉原先调用里的某些函数,然后执行查看结果.
+(member 'a '((a b) (c d)) :key #'car :test #'equal) :key关键字的函数会对每个参数求值, :test 参数是比较函数,默认是eql. 这里,我们把:key关键字对应的函数改成调用我们指定的car; :test关键字对应的函数改成我们指定的equal.该函数的功能就是,询问是否有一个元素的car等于(equal) 'a.
+
+集合论中的并集(union),交集(intersection)以及补集(complement)的实现,是由函数union,intersection以及set-difference.这些函数期望两个(正好2个)列表(一样接受member函数同样的关键字参数).
+(union '(a b c) '(c b s)) 执行结果是(A C B S)
+(intersection '(a b c) '(b b c)) 执行结果为 (C B)
+(set-difference '(a b c d e) '(b e)) 执行结果为 (D C A)
+
+
