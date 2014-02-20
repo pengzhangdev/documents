@@ -1,0 +1,159 @@
+Blocks:
+
+1. 在progn主体中的表达式会依次求值,并返回最后一个表达式的值:
+> (progn 
+    (format t "a")
+    (format t "b")
+    (+ 11 12))
+  
+2. 一个block像是带有名字及紧急出口的progn.第一个参数应为符号.在主体中的任何地方,你可以停止求值,并透过return-from指定区块的名字来立即返回一个数值.
+> (block head
+    (format t "Here we go.")
+    (return-from head 'idea)
+    (format t "We'll nevert see this."))
+  
+3. return宏,它把传入的参数当作封闭区块nil的返回值:
+> (block nil
+    (return 27))
+  
+> (dolist (x '(a b c d e))
+    (format t "~A " x)
+    (if (eql x 'c)
+      (return 'done)))
+    
+4. 使用defun定义的函数主体,都被隐含在一个与函数同名的区块,所以你可以:
+> (defun foo ()
+    (return-from foo 27))
+  
+Context:
+1. let, 它接受一个代码主体,但允许我们在主体内设置新变量:
+> (let ((x 7)
+        (y 2))
+      (format t "Number")
+      (+ x y))
+    
+2. 由let创造的变量的值,不能依赖其他由同一个let创造的变量.下面片段中y的值不为3,因为(+ x 1) 中x为定义.
+> (let ((x 2)
+        (y (+ x 1))
+        (+ x y))
+      
+3. 基于2 的情况,如果我们真希望这么实现,可以使用let*,它等同于潜逃let调用.
+
+4. destructuring-bind 宏是通用化的let.它接受一个模式(pattern)-- 一个或多个变量所形成的树-- 并将它们与某个实际的树所对应的部分做绑定.
+> (destructuring-bind )(w (x y) . z) (a (b c) d e) (list w x y z)) 输出为:(A B C (D E))    <- 为什么?
+
+
+Conditionals
+1. when 接受一个测试表达式(test expression)与一个代码主体.若测试表达式为真,则对主体求值.
+> (when (oddp that)
+    (format t "Hmm, that's odd.")
+    (+ that 1))
+  
+2. when 相反的是unless,用法与when一样,但测试条件为假时才执行主体.
+
+3. cond,允许多重条件式,并且与每个条件式相关的代码是隐式的progn.它预期我们需要在一个if中使用另一个if的情况下使用.
+> (defun our-member (obj lst)
+    (if (atom lst)
+      nil
+      (if (eql (car lst) obj)
+        lst
+        (our-member obj (cdr lst)))))
+      
+> (defun out-member (obj lst)
+    (cond ((atom lst) nil)
+          ((eql (car lst) obj) lst)
+          (t (our-member obj (cdr lst)))))
+          
+4. 当你想要把一个数值与一系列的常量比较时, case相当有用,类似cpp中的switch-case语句块.
+> (defun month-length (mon)
+    (case mon
+      ((jan mar may jul aug oct dec) 31)
+      ((apr jun sept mov) 30)
+      (feb (if (leap-year) 29 28))
+      (otherwise "unknown month")))
+    
+Iteration:
+1. do语句中包含了block和tagbody,所以可以使用return和go表达式.do的第一个参数必须是一个变量规格说明的列表,每个可以如下形式(variable  initial  update). initial与update 形式是选择性的.
+> (defun show-squares (start end)
+    (do ((i start (+ i 1)))
+        ((> i end) 'done)
+        (format t "~A ~A~%" i (* i i))))
+      
+2. 如果do的多变量中,有一个变量使用了另一个变量,类似let中的依赖产生,则在do中,依赖的变量永远会滞后一个循环.
+> (let ((x 'a))
+    (do ((x 1 (+ x 1))
+         (y x x))
+        ((> x 5))
+        (format t "(~A ~A) " x y)))
+输出: (1 A) (2 1) (3 2) (4 3) (5 4)
+      NIL
+
+3. 当然,如果想达到2的效果,与let类似,有一个do*函数,可以实现.
+
+4. 如果需要迭代一个列表,我们可以使用dolist
+> (dolist (x '(a b c d) 'done)
+    (format t "~A " x))
+  
+5. 同样dotimes也是类似的迭代,只是他是给定某个n,从整数0迭代至n-1:
+> (dotimes (x 5 x)
+    (format t "~A " x))
+  
+6. 以下是利用do第2点提到的副作用,实现的一个功能:
+> (defun factorial (n)
+    (do ((j n (- j 1))
+         (f 1 (* j f)))
+        ((= j 0) f)))
+      
+7. 函数mapc和mapcar很像,但不会cons一个新列表作为返回值,随意使用它的唯一原因是为了副作用,它比dolist灵活,因为它可以同时便利多个列表.
+> (mapc #'(lambda (x y)
+          (format t "~A ~A " x y))
+          '(hip flip slip)
+          '(hop flop slop))
+
+
+Multiple Values:
+1. get-decoded-time 返回9个数值来表示现在的时间:秒, 分, 时, 日期, 月, 天以及另外两个.
+
+2. value函数返回多个数值.它一个不少地返回你作为数值所传入的参数:
+> (values 'a nil (+ 2 4))
+
+3. 若只期望一个返回值,则第一个之外的被舍弃.同理若期望多余有效个数的返回值,多余部分变量被赋值为nil.
+> (let ((x (values 1 2))
+        (y (values)))
+        x
+        y)
+则x为1 y为nil
+
+4. 要接收多个数值,可以使用multiple-value-bind
+> (multiple-value-bind (x y z) (values 1 2 3) (list x y z))
+> (multiple-value-bind (s m h) (get-decoded-time)
+    (format t "~A:~A:~A" h m s))
+  
+5. 也可以通过multiple-value-call将多值作为参数传递到第二个函数:
+> (multiple-value-call #'+ (value 1 2 3))
+
+6.catch,throw 函数是配对使用的函数,类似java和cpp中的异常处理函数.在catch表达式接受一个标签(tag),标签可以是任何种类的对象,伴随着一个表达式主体:
+> (defun super()
+    (catch 'abort
+      (sub)
+      (format t "We'll never see this!")))
+> (defun sub ()
+    (throw 'abort 99))
+ 
+  表达式依次求值.在一个带有标签的throw会导致catch表达式直接返回.
+  
+7. 整个throw -> catch的过程是,在throw抛出标签后,会把控制权交给所有的catch,catch依次比较标签,直到找到匹配的.如果未找到匹配的,throw会产生一个错误.
+
+8. error函数会中断执行,并把控制权移交Lisp错误处理器(error handler).通常会导致调用一个中断循环(break loop).
+
+9. 有中断也有屏蔽中断.unwind-protect函数就可以确保6,7,8的中断不会让你的程序停在一个不一致的状态.unwind-protect接受任何数量的参数并返回第一个参数的值.
+> (setf x 1)
+> (catch 'abort
+    (unwind-protect
+      (throw 'abort 99)
+      (setf x 2)))
+99
+> x
+2
+
+10.
