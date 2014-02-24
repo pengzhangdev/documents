@@ -1,0 +1,59 @@
+http://stackoverflow.com/questions/3046889/optional-parameters-with-c-macros
+
+
+
+With great respect to Derek Ledbetter for his answer — and with apologies for reviving an old question.
+
+Getting an understanding of what it was doing and picking up elsewhere on the ability to preceed the __VA_ARGS__ with ## allowed me to come up with a variation...
+
+// The multiple macros that you would need anyway [as per: Crazy Eddie]
+#define XXX_0()                     <code for no arguments> 
+#define XXX_1(A)                    <code for one argument> 
+#define XXX_2(A,B)                  <code for two arguments> 
+#define XXX_3(A,B,C)                <code for three arguments> 
+#define XXX_4(A,B,C,D)              <code for four arguments>  
+
+// The interim macro that simply strips the excess and ends up with the required macro
+#define XXX_X(x,A,B,C,D,FUNC, ...)  FUNC  
+
+// The macro that the programmer uses 
+#define XXX(...)                    XXX_X(,##__VA_ARGS__,\
+                                          XXX_4(__VA_ARGS__),\
+                                          XXX_3(__VA_ARGS__),\
+                                          XXX_2(__VA_ARGS__),\
+                                          XXX_1(__VA_ARGS__),\
+                                          XXX_0(__VA_ARGS__)\
+                                         ) 
+
+For non-experts like me who stumble upon the answer, but can't quite see how it works, I'll step through the actual processing, starting with the following code...
+
+XXX();
+XXX(1); 
+XXX(1,2); 
+XXX(1,2,3); 
+XXX(1,2,3,4); 
+XXX(1,2,3,4,5);      // Not actually valid, but included to show the process 
+
+Becomes...
+
+XXX_X(, XXX_4(), XXX_3(), XXX_2(), XXX_1(), XXX_0() );
+XXX_X(,1, XXX_4(1), XXX_3(1), XXX_2(1), XXX_1(1), XXX_0(1) );
+XXX_X(,1,2, XXX_4(1,2), XXX_3(1,2), XXX_2(1,2), XXX_1(1,2), XXX_0(1,2) );
+XXX_X(,1,2,3, XXX_4(1,2,3), XXX_3(1,2,3), XXX_2(1,2,3), XXX_1(1,2,3), XXX_0(1,2,3) );
+XXX_X(,1,2,3,4, XXX_4(1,2,3,4), XXX_3(1,2,3,4), XXX_2(1,2,3,4), XXX_1(1,2,3,4), XXX_0(1,2,3,4) );
+XXX_X(,1,2,3,4,5, XXX_4(1,2,3,4,5), XXX_3(1,2,3,4,5), XXX_2(1,2,3,4,5), XXX_1(1,2,3,4,5), XXX_0(1,2,3,4,5) );
+
+Which becomes just the sixth argument...
+
+XXX_0(); 
+XXX_1(1); 
+XXX_2(1,2); 
+XXX_3(1,2,3); 
+XXX_4(1,2,3,4); 
+5; 
+
+PS: Remove the #define for XXX_0 to get a compile error [ie: if a no-argument option is not allowed].
+
+PPS: Would be nice to have the invalid situations (eg: 5) be something that gives a clearer compilation error to the programmer!
+
+PPPS: I'm not an expert, so I'm very happy to hear comments (good, bad or other)!
