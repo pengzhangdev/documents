@@ -1,0 +1,25 @@
+Global Functions
+
+1. fboundp 告诉我们是否有一个函数的名字是有一个给定的符号.
+
+2. 如果一个符号是函数的名字,symbol-name 会返回它:
+> (fboundp '+)
+T
+> (symbol-function '+)
+
+3. 我们可以配合setf和symbol-function 来绑定一个函数给一个名字:
+> (setf (symbol-function 'add2) 
+          #'(lambda (x) (+ x 2)))
+          
+4. 在一个函数名是(setf f)的函数定义中,第一个参数代表新的数值,而剩余的参数代表了传给f的参数.即,下面程序运行的结果是(A . 480)
+          1-(defun primo (lst)                                                                                                                                 
+          2  (car lst))                                                                                                                                        
+          3                                                                                                                                                    
+          4(defun (setf primo) (val lst)                                                                                                                       
+          5  (setf (cdr lst) val))                                                                                                                             
+          6                                                                                                                                                    
+          7(let ((x (list 'a 'b 'c 'd)))                                                                                                                       
+          8  (setf (primo x) 480)                                                                                                                              
+          9  x)  
+          
+5. 
