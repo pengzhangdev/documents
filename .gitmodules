@@ -1,0 +1,3 @@
+[submodule "ecl-doc"]
+	path = ecl-doc
+	url = git://git.code.sf.net/p/ecls/ecl-doc
