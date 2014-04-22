@@ -14,7 +14,22 @@
    幅度比其他管理器小,所以,在后期,实际占用内存空间会相接近.
 
 ** 原理简析
-   
+
+*** overview
+
+    [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/overview.gif]]
+
+    tcmalloc为每一个线程分配一个线程本地缓存(Thread Cache)．所有小对象
+    (<256K)都会优先从Thread Cache分配．而当Thread Cache没有足够空闲内
+    存时，就会从Central Heap申请内存. 而当Thread Cache内存富裕时,会将
+    内存返回给Central Heap. Central Heap 是以进程为单位存在,Thread
+    Cache是以线程为单位存在.
+    对于大内存(>256K), 直接从Central Heap 按页对齐(4K)申请.
+    通常情况下, 一连串的页面(4k)可以多个小内存序列,每个序列元素等大小.
+
+*** 小对象内存分配
+    [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/threadheap.gif]]
+    
 
 ** 草稿
 
