@@ -1,0 +1,36 @@
+* tcmalloc2.1 浅析
+
+** 算法简介
+** 代码
+** 总结
+   
+
+** 简介
+   tcmalloc(thread cached malloc) 是由google为并发程序而开发的内存分配管理器.tcmalloc致力于
+   减少多线程内存请求时对锁的竞争, 在对小内存的申请时, 可以在无需锁的
+   情况下高效获取内存;而在获取大内存时,使用高校的spinlocks.正因为
+   tcmalloc是在线程局部空间(TLS)预先存储部分空闲内存用于分配, 在程序刚
+   启动时,其所占用的内存会比dlmalloc或其他的内存管理器更大,但其增长速
+   幅度比其他管理器小,所以,在后期,实际占用内存空间会相接近.
+
+** 原理简析
+   
+
+** 草稿
+
++ 主要函数
+#+BEGIN_SRC cpp
+extern "C" PERFTOOLS_DLL_DECL void* tc_malloc(size_t size) __THROW
+extern "C" PERFTOOLS_DLL_DECL void tc_free(void* ptr) __THROW
+extern "C" PERFTOOLS_DLL_DECL void* tc_calloc(size_t n,
+                                              size_t elem_size) __THROW
+extern "C" PERFTOOLS_DLL_DECL void tc_cfree(void* ptr) __THROW
+extern "C" PERFTOOLS_DLL_DECL void* tc_realloc(void* old_ptr,
+                                               size_t new_size) __THROW
+extern "C" PERFTOOLS_DLL_DECL void* tc_new(size_t size)
+extern "C" PERFTOOLS_DLL_DECL void tc_delete(void* p) __THROW
+#+END_SRC
+
+真正分配内存的函数是do_malloc函数.
+
+
