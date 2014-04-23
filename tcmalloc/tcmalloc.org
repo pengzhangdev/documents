@@ -1,10 +1,5 @@
 * tcmalloc2.1 浅析
 
-** 算法简介
-** 代码
-** 总结
-   
-
 ** 简介
    tcmalloc(thread cached malloc) 是由google为并发程序而开发的内存分配管理器.tcmalloc致力于
    减少多线程内存请求时对锁的竞争, 在对小内存的申请时, 可以在无需锁的
@@ -29,7 +24,11 @@
 
 *** 小对象内存分配
     [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/threadheap.gif]]
-    
+
+
+** 代码review
+
+** 总结
 
 ** 草稿
 
@@ -46,6 +45,44 @@ extern "C" PERFTOOLS_DLL_DECL void* tc_new(size_t size)
 extern "C" PERFTOOLS_DLL_DECL void tc_delete(void* p) __THROW
 #+END_SRC
 
-真正分配内存的函数是do_malloc函数.
+   真正分配内存的函数是do_malloc函数.
 
+*** tc_malloc
 
+#+BEGIN_SRC cpp
+// line: 1577 file: /root/git/gperftools/src/tcmalloc.cc
+extern "C" PERFTOOLS_DLL_DECL void* tc_malloc(size_t size) __THROW {
+  void* result = do_malloc_or_cpp_alloc(size);
+  MallocHook::InvokeNewHook(result, size);
+  return result;
+}
+// line: 1581
+#+END_SRC
+
+#+BEGIN_SRC cpp
+// line: 1038 file: /root/git/gperftools/src/tcmalloc.cc
+inline void* do_malloc_or_cpp_alloc(size_t size) {
+  // tc_new_mode 是指是否使用cpp的new来替换malloc实现.
+  // 默认情况下为使用malloc, 所以代码进入do_malloc(size);
+  return tc_new_mode ? cpp_alloc(size, true) : do_malloc(size);
+}
+// line: 1041
+#+END_SRC
+
+#+BEGIN_SRC cpp
+// line: 1118 file: /root/git/gperftools/src/tcmalloc.cc
+inline void* do_malloc(size_t size) {
+  void* ret = do_malloc_no_errno(size);
+  // UNLIKELY 是gcc的优化扩展,表示其测试成立条件极低.
+  //
+  if (UNLIKELY(ret == NULL)) errno = ENOMEM;
+  return ret;
+}
+// line: 1123
+#+END_SRC
+
+#+BEGIN_SRC cpp
+// line:   49 file: /root/git/gperftools/src/common.h
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+// line:   49
+#+END_SRC
