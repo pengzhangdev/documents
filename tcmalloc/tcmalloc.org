@@ -19,12 +19,24 @@
     存时，就会从Central Heap申请内存. 而当Thread Cache内存富裕时,会将
     内存返回给Central Heap. Central Heap 是以进程为单位存在,Thread
     Cache是以线程为单位存在.
-    对于大内存(>256K), 直接从Central Heap 按页对齐(4K)申请.
+    对于大内存(>256K), 直接从Page Heap 按页对齐(4K)申请.
     通常情况下, 一连串的页面(4k)可以多个小内存序列,每个序列元素等大小.
+    TC, CC, PH 的关系是, TC 向CC申请内存并GC给CC. CC 向PH 申请内存并GC
+    给PH.
+    在TC中的数据单位时字节, 按大小为单位分类,每个类中时链表.
+    在PH中的数据单位时Page(4K), 按PageNum分类,每个分类内部用链表管理,
+    第PageNum类的链表结点为PageNum个Page.
+    在CC中存在最多的数据结构,它连接着TC和PH. 其存放了来自CC的slot结构,
+    和来自PH的PH的span结构.
+    数据的移动. 所有的数据从TC<->CC<->PH 都是批量(batch)移动.从TC申请
+    或释放的内存都会优先从CC的slots数组处理. slots存放的就是最近从TC释
+    放的内存,用于快速的TC内存申请.如果slots条件不满足,就会操作CC中的
+    spans对象.所有移动的数据的大小和TC中的最大大小都是在动态调整的.
 
 *** 小对象内存分配
     [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/threadheap.gif]]
-    上图为小内存管理时的sizemap分类的示意图.针对小内存,
+    上图为小内存管理时的sizemap分类的示意图.小内存的管理都处于
+    ThreadCache中.
 
 ** 代码review
 
@@ -81,7 +93,7 @@ inline void* do_malloc(size_t size) {
 }
 // line: 1123
 #+END_SRC
-[[UNLIKELY][UNLIKELY]]
+    [[UNLIKELY][UNLIKELY]]
 
 #+BEGIN_SRC cpp
 // line: 1107 file: /root/git/gperftools/src/tcmalloc.cc
@@ -102,10 +114,10 @@ inline void* do_malloc_no_errno(size_t size) {
 }
 // line: 1117
 #+END_SRC
-[[MinSizeForSlowPath]]
-[[tcmalloc_tc_init]]
+    [[MinSizeForSlowPath]]
+    [[tcmalloc_tc_init]]
 
-#<<MinSizeForSlowPath>>
+    #<<MinSizeForSlowPath>>
 #+BEGIN_SRC cpp
 // line:  436 file: /root/git/gperftools/src/thread_cache.h
 inline size_t ThreadCache::MinSizeForSlowPath() {
@@ -120,14 +132,14 @@ inline size_t ThreadCache::MinSizeForSlowPath() {
 // line:  443
 #+END_SRC
 
-#<<UNLIKELY>>
+    #<<UNLIKELY>>
 #+BEGIN_SRC cpp
 // line:   49 file: /root/git/gperftools/src/common.h
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 // line:   49
 #+END_SRC
 
-#<<tcmalloc_tc_init>>
+    #<<tcmalloc_tc_init>>
 #+BEGIN_SRC cpp
 // line:  417 file: /root/git/gperftools/src/thread_cache.h
 inline ThreadCache* ThreadCache::GetCache() {
@@ -144,10 +156,10 @@ inline ThreadCache* ThreadCache::GetCache() {
 }
 // line:  427
 #+END_SRC
-[[InitModule]]
-[[CreateCacheIfNecessary]]
+    [[InitModule]]
+    [[CreateCacheIfNecessary]]
 
-#<<InitModule>>
+    #<<InitModule>>
 #+BEGIN_SRC cpp
 // line:  314 file: /root/git/gperftools/src/thread_cache.cc
 void ThreadCache::InitModule() {
@@ -166,17 +178,18 @@ void ThreadCache::InitModule() {
 }
 // line:  325
 #+END_SRC
-[[InitStaticVars]]
-[[allocator_init]]
+    [[InitStaticVars]]
+    [[allocator_init]]
 
-#<<InitStaticVars>>
+    #<<InitStaticVars>>
 #+BEGIN_SRC cpp
 // line:   81 file: /root/git/gperftools/src/static_vars.cc
 void Static::InitStaticVars() {
   // sizemap 初始化
-  // dlmalloc的分箱机制.
+  // 类似dlmalloc的分箱机制.
   // 按固定大小进行分类,在每个分类中存放对应大小的双向链表.
   sizemap_.Init();
+  // 初始化span分配器
   span_allocator_.Init();
   span_allocator_.New(); // Reduce cache conflicts
   span_allocator_.New(); // Reduce cache conflicts
@@ -184,6 +197,7 @@ void Static::InitStaticVars() {
   bucket_allocator_.Init();
   // Do a bit of sanitizing: make sure central_cache is aligned properly
   CHECK_CONDITION((sizeof(central_cache_[0]) % 64) == 0);
+  // 初始化central_cache_ 分类列表.
   for (int i = 0; i < kNumClasses; ++i) {
     central_cache_[i].Init(i);
   }
@@ -192,22 +206,28 @@ void Static::InitStaticVars() {
   // so that HeapLeakChecker does not consider all the byte patterns stored
   // in is caches as pointers that are sources of heap object liveness,
   // which leads to it missing some memory leaks.
+  // 初始化 PageHeap
   pageheap_ = new (MetaDataAlloc(sizeof(PageHeap))) PageHeap;
+  // double linked list init
   DLL_Init(&sampled_objects_);
   Sampler::InitStatics();
 }
 // line:  102
 #+END_SRC
-[[sizemap_init]]
+    [[sizemap_init]]
 
-
-#<<sizemap_init>>
+    #<<sizemap_init>>
 #+BEGIN_SRC cpp
 // line:  122 file: /root/git/gperftools/src/common.cc
 void SizeMap::Init() {
+  // 初始化TC中对应TransferNumObjects.
+  // TransferNumObjects 是
   InitTCMallocTransferNumObjects();
 
   // Do some sanity checking on add_amount[]/shift_amount[]/class_array[]
+  // class 分类边界检查.
+  // size 0 应该对应分类0
+  // size Max 应该对应分类Max
   if (ClassIndex(0) != 0) {
     Log(kCrash, __FILE__, __LINE__,
         "Invalid class index for size 0", ClassIndex(0));
@@ -218,6 +238,9 @@ void SizeMap::Init() {
   }
 
   // Compute the size classes we want to use
+  // 计算size classe 分类大小, 和对应的每个分类对应的
+  // 计算结果如下:
+  // class 1 : 
   int sc = 1;   // Next size class to assign
   int alignment = kAlignment;
   CHECK_CONDITION(kAlignment <= kMinAlign);
@@ -303,10 +326,49 @@ void SizeMap::Init() {
 }
 // line:  218
 #+END_SRC
+[[AlignmentForSize]]
 
-#<<allocator_init>>
+#<<AlignmentForSize>>
+#+BEGIN_SRC cpp
+// kPageShift = 13
+// kNumClasses = 88
+// kMinAlign = 16
+// kAlignment  = 8
+// kMaxSize    = 256 * 1024
+// kPageSize   = 1 << kPageShift
 
-#<<CreateCacheIfNecessary>>
+// 计算结果如下:
+// size         alignment
+// >kMaxSize    kPageSize;
+// >=128        
+// >= 16        16
+// >= 8         8
+int AlignmentForSize(size_t size) {
+  int alignment = kAlignment;
+  if (size > kMaxSize) {
+    // Cap alignment at kPageSize for large sizes.
+    alignment = kPageSize;
+  } else if (size >= 128) {
+    // Space wasted due to alignment is at most 1/8, i.e., 12.5%.
+    alignment = (1 << LgFloor(size)) / 8;
+  } else if (size >= kMinAlign) {
+    // We need an alignment of at least 16 bytes to satisfy
+    // requirements for some SSE types.
+    alignment = kMinAlign;
+  }
+  // Maximum alignment allowed is page size alignment.
+  if (alignment > kPageSize) {
+    alignment = kPageSize;
+  }
+  CHECK_CONDITION(size < kMinAlign || alignment >= kMinAlign);
+  CHECK_CONDITION((alignment & (alignment - 1)) == 0);
+  return alignment;
+}
+#+END_SRC
+
+    #<<allocator_init>>
+
+    #<<CreateCacheIfNecessary>>
 #+BEGIN_SRC cpp
 // line:  345 file: /root/git/gperftools/src/thread_cache.cc
 ThreadCache* ThreadCache::CreateCacheIfNecessary() {
@@ -358,9 +420,9 @@ ThreadCache* ThreadCache::CreateCacheIfNecessary() {
 }
 // line:  396
 #+END_SRC
-[[NewHeap]]
+    [[NewHeap]]
 
-#<<NewHeap>>
+    #<<NewHeap>>
 #+BEGIN_SRC cpp
 // line:  398 file: /root/git/gperftools/src/thread_cache.cc
 ThreadCache* ThreadCache::NewHeap(pthread_t tid) {
@@ -386,9 +448,9 @@ ThreadCache* ThreadCache::NewHeap(pthread_t tid) {
 }
 // line:  414
 #+END_SRC
-[[thread_allocator_New]]
+    [[thread_allocator_New]]
 
-#<<thread_allocator_New>>
+    #<<thread_allocator_New>>
 #+BEGIN_SRC cpp
 // line:   62 file: /root/git/gperftools/src/page_heap_allocator.h
   T* New() {

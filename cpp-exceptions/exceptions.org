@@ -1,0 +1,24 @@
+* gcc的异常处理实现原理
+
+** overview
+   一般我们认为,程序错误有三种: 用户错误(user error);运行时错误
+   (runtime error);异常(exceptions). 下面我们介绍下g++异常处理的实现.
+   我们的目标是,通过这种介绍,能够用C代码实现类似CPP的异常处理机制.当然,由
+   于缺少CPP中的exceptions类,我们只能时实现throw, try .. catch. 所以,
+   重点就是介绍throw的实现和 try .. catch 的实现.
+
+*** throw的实现
+    一般的throw代码如下. 抛出一个异常对象. 所以, 首先throw需要分配内存
+    用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数__cxa_allocate_exception实现,这
+    个函数在libstdc++中可以找到.而执行例外handler的检索的动作
+    由__cxa_throw 实现.
+#+BEGIN_SRC cpp
+throw 0xff
+#+END_SRC
+
+*** exceptions安装(try .. catch ..) (SjLj篇)
+    SjLj是g++例外安装的一种实现方式, 可以通过'gcc --version', 查看是否
+    有'--enable-sjlj-exceptions'选项.在主流的gcc中,都是disable的. 所谓
+    的sjlj, 就是指利用setjmp/longjmp实现的异常处理方式.
+
+*** exceptions安装(try .. catch ..) (WA2篇)
