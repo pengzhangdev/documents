@@ -7,7 +7,7 @@
    于缺少CPP中的exceptions类,我们只能时实现throw, try .. catch. 所以,
    重点就是介绍throw的实现和 try .. catch 的实现.
 
-*** throw的实现
+** throw的实现
     一般的throw代码如下. 抛出一个异常对象. 所以, 首先throw需要分配内存
     用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数__cxa_allocate_exception实现,这
     个函数在libstdc++中可以找到.而执行例外handler的检索的动作
@@ -15,10 +15,49 @@
 #+BEGIN_SRC cpp
 throw 0xff
 #+END_SRC
-
-*** exceptions安装(try .. catch ..) (SjLj篇)
+    
+** exceptions安装(try .. catch ..) (SjLj篇)
     SjLj是g++例外安装的一种实现方式, 可以通过'gcc --version', 查看是否
     有'--enable-sjlj-exceptions'选项.在主流的gcc中,都是disable的. 所谓
     的sjlj, 就是指利用setjmp/longjmp实现的异常处理方式.
 
-*** exceptions安装(try .. catch ..) (WA2篇)
+** exceptions安装(try .. catch ..) (WA2篇)
+  
+
+*** WA2预备知识.
+    提到调试信息,基本上不可避免地想到堆栈信息.而要打印堆栈信息,必须得
+    了解函数调用的一些规则和堆栈的结构.
+**** C 函数的调用和返回
+     首先,我们必须了解,编译器如何实现函数的调用和返回的.如果我们反汇编
+     果代码,所有未优化的情况下,函数的调用都是通过几个push指令和call指
+     令进行跳转. 所以,这里,编译器实际上是为每个函数建立了一个栈帧
+     (stack frame).stack frame中存放了以下数据信息:
+     1. 传递参数: 一般情况下,函数的调用参数是在该stack frame 最顶部.
+     2. 返回地址: 也就是return的地址,通常指向函数调用的下一个指令.
+     3. 调用者当前的栈指针: 用于恢复调用者现场
+     4. 函数内部的局部变量.
+        
+        如下图:
+        [[图]]
+     这里提下,调用约定.所谓调用约定,是指参数进栈的顺序,以及返回时,由谁
+     清理栈信息.C语言的参数进栈顺序是从右到左,由谁清理则可google "gcc 调
+     用约定".
+**** C++ 函数的调用和返回
+     这里为什么要把C++和C进行区分呢? 因为C++中存在异常处理!而异常处理
+     的引入,在编译器生成stack frame时,需要额外引入一些数据和规则.
+     我们先来看下面的图,和对应的跟异常相关的几个数据结构.
+     [[图]]
+
+     #+BEGIN_SRC cpp
+
+     #+END_SRC
+
+**** stack unwind
+     stack unwind 的主要功能是,在异常处理完成后,能够安全地析构生命周期
+     结束的所有资源.
+
+**** 异常抛出
+
+**** 异常捕获
+
+**** 开销计算
