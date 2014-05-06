@@ -32,9 +32,9 @@ throw 0xff
 
 
 ** exceptions安装(try .. catch ..) (WA2篇)
-    DW2 全称是 DWARF2, 指调试人已记录格式V2, 是用户调试的信息格式的规格.
-    而exceptions DW2 版是指,利用DW2的调试信息实现的exceptions跳转等动作.
-    一般时Unwind-dw2 实现.
+   DW2 全称是 DWARF2, 指调试人已记录格式V2, 是用户调试的信息格式的规格.
+   而exceptions DW2 版是指,利用DW2的调试信息实现的exceptions跳转等动作.
+   一般时Unwind-dw2 实现.
 
 *** WA2预备知识.
     提到调试信息,基本上不可避免地想到堆栈信息.而要打印堆栈信息,必须得
@@ -50,7 +50,7 @@ throw 0xff
      4. 函数内部的局部变量.
 
         如下图:
-        [[./x86_stack_frame.png]]
+        [[x86_stack_frame.png]]
         [[http://en.wikibooks.org/wiki/X86_Disassembly/Functions_and_Stack_Frames]]
 
         arm stack frame
@@ -69,7 +69,7 @@ throw 0xff
 
       // function
 static int fuc(int x, int y) //定义函数
- {   
+ {
   370:   b500        push    {lr}
   372:   b085        sub sp, #20
 
@@ -79,19 +79,98 @@ static int fuc(int x, int y) //定义函数
      用约定".
      而在arm中,参数对应R0-R3, 从左到右对应.
 
-**** C++ 函数的调用和返回
+**** C++ 函数的调用和返回 (X86)
      这里为什么要把C++和C进行区分呢? 因为C++中存在异常处理!而异常处理
      的引入,在编译器生成stack frame时,需要额外引入一些数据和规则.
      我们先来看下面的图,和对应的跟异常相关的几个数据结构.
-     []
 
      #+BEGIN_SRC cpp
 
      #+END_SRC
 
+**** ARM Exception Handling ABI
+     在arm结构中,存在两个额外的section,用于存放exception的一些信息.它
+     们是.ARM.exidx 和 .ARM.extab.
+***** .ARM.exidx 结构如下
+
+      #+BEGIN_EXAMPLE
+        one  (KEY)
+      +-+----------------------+
+      |0| prel31_offset_to_fnc |
+      +-+----------------------+
+      31 30                   0
+
+                                two
+      EXIDX_CANTUNWIND    +----------------------+-+
+                        |                      |1|
+                        +----------------------+-+
+                        31                    1 0
+
+      two
+
+      The ex table entry itself  +-+----------------------+
+      encoded in 31bit           |1|         ex_tbl_entry |
+                           +-+----------------------+
+                          31 30                     0
+
+      two
+
+      prel32 offset of the start +-+----------------------+
+      of the table entry for     |0| tbl_entry_offset     |
+      this function              +-+----------------------+
+                           31 30                    0
+      #+END_EXAMPLE
+
+      ARM.exidx包含了已排序的key-value对数据结构. key 是一个31bit 指向对应函
+      数的入口地址的值. 而value包含以下3个方面: 
+1. 0x1, 函数无法被回退.
+2. 31bit为1, 其余位为exception table entry的数据, 也就是说直接将
+   excetion table中的对应数据放在该位置. 
+3. 31bit为0, 其余位指向
+
+***** .ARM.extab
+      这个section存在两个结构, 如下, 
+#+BEGIN_EXAMPLE
+ generic model:
++-+----------------------+ +-----------------------
+|0| prs_fnc_offset       | | prs_data |
++-+----------------------+ +-----------------------
+31 30                    0
+
+ compact model:
++-+-----+-----+----------+ +-----------------------
+|1| 0   | idx | prs_data | | optional_prs_data
++-+-----+-----+----------+ +-----------------------
+31 30-28 27-24 23        0
+#+END_EXAMPLE
+
+我们使用的是第二种. bit 31 of the first word is set - in this case
+the bits 24-27 selects one of the default personality routines.
+在arm里面,存在3种personality routines.
+[[personality_routine.png]]
+[[unwind_instructions.png]]
+
+PR这个函数的主要功能就是查找是否有满足需求的handler.
+
 **** stack unwind
      stack unwind 的主要功能是,在异常处理完成后,能够安全地析构生命周期
-     结束的所有资源.
+     结束的所有资源.利用上面的两个section, 在throw(__cxx_throw)抛出时,
+     触发_Unwind_RaiseException 函数调用,在这个函数中除了基本的寄存器
+     状态保存和恢复外,还执行了堆栈的回退查找,用户查找调用者的异常处理,
+     第一阶段如下:
+     1. 保存寄存器状态,并将返回的地址从r14 拷贝到 r15.
+     2. 在.ARM.exidx 中查找地址匹配r15中地址的项.如果没找到,或者值是
+        EXIDX_CANTUNWIND,则在终止异常抛出.
+     3. 如果找到了,则执行一些基本的初始化,并执行对应personality
+        routine(PR)函数.
+     4. PR函数测试该entry是否能处理该异常. 有三个返回状态:
+        _URC_HANDLER_FOUND(找到异常处理函数), _URC_CONTINUE_UNWIND(针
+        对当前函数继续从1 开始执行,查找调用者函数能否处
+        理),_URC_FAILURE(失败).
+
+     第二阶段如下:
+     
+
 
 **** 异常抛出
 
