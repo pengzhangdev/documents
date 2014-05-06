@@ -14,6 +14,7 @@
 
     [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/overview.gif]]
 
+
     tcmalloc为每一个线程分配一个线程本地缓存(Thread Cache)．所有小对象
     (<256K)都会优先从Thread Cache分配．而当Thread Cache没有足够空闲内
     存时，就会从Central Heap申请内存. 而当Thread Cache内存富裕时,会将
@@ -41,6 +42,69 @@
 ** 代码review
 
 ** 总结
+   + 对图表的几个说明:
+     + 图表是在线程数为4的基础上做的测试. 并且是在连续分配一定次数的内
+       存后再连续释放,数据只能从一定程度上反映了tcmalloc与dlmalloc的性
+       能差异.
+     + 本次测试是计算出4个线程的内存请求和释放的平均时间, 和标准偏差.由
+       于图表维度不够,只使用了平均时间作为实际的性能比较.
+     + 测试时的两个变量分别为, 单次申请内存大小,和申请次数,性能指标为
+       执行所有内存申请释放的线程平均时间.
+     + 该数据不包含内存分配器初始化的时间(即,第一次内存分配时间).实际
+       上,内存分配器初始化,tcmalloc花费的时间是dlmalloc多.但只
+       是针对第一次,所以,不记录到图标数据中.
+     + 以下所有提到的内存申请数,如未说明,都是指单次内存申请的大小.
+
+   + 分析:
+     + tcmalloc 内存分配概要:
+       + tcmalloc 中存在分级请求内存的机制. 分为3级,分别为
+         TC(ThreadCache), CC(Central Cache) 和 PH(PageHeap)
+       + TC 向CC 申请内存, CC 向PH申请内存. 而他们之间的内存是批量移动,一
+         般为申请内存对齐后的N倍进行移动.
+       + TC 存在线程局部空间中. 向TC 申请内存不需要加解锁,向CC和PH 申
+         请内存需要加解锁.
+     + dlmalloc 内存分配概要:
+       + dlmalloc每次内存申请都会执行加解锁操作.
+       + 256byte以下的内存,从小内存分配. 256byte以上的从大内存分配.在
+         空闲内存不够并且申请内存大于256K的,直接由mmap分配.
+
+     + 首先,从图表可以得出一个结论,在单次内存30K以内的内存分配和释放,
+       效率上,tcmalloc比dlmalloc高,并且在1K以内,申请次数大于26次的情况
+       下,甚至可以达到10倍性能.原因是,在tcmalloc中,所有小于256k的内存
+       都会优先从TC(避免加解锁操作)分配, 在TC不够的情况下,向CC申请 2 -
+       32 倍的内存数量,并存放到TC中,相当于, N(N>2)次内存请求才执行1次
+       加解锁. 而dlmalloc每次内存请求都会加解锁.所以,tcmalloc在小内存
+       分配上,性能高于dlmalloc.
+     + 而在30K - 256K, 在某些区域内,tcmalloc的性能反而不如dlmalloc. 可
+       能原因如下: tcmalloc在每次往CC中拷贝数据时, 有个大小上限为64K,
+       也有一个最小下限为2倍请求内存对齐后的大小. 所以,在这个
+       区间内,相当于每2次内存请求都会加解一次锁. 而CC也有
+       存在内存不足的情况,也会出现加解锁,进一步向PH申请空间. 所以,就相
+       当于每次内存申请都会加解锁.至于,在申请次数达到一定值之
+       后,tcmalloc的性能又高于dlmalloc的原因是:CC与PH之间的内存移动的
+       值是动态修正的,也就是说,在申请次数达到一定值之后,CC向PH申请的内
+       存数变大,而请求次数减少,导致tcmalloc的性能再次提升.
+     + > 256K 的情况下,tcmalloc的性能也略好于dlmalloc. 原因未知.分析如
+       下. 在这种情况下,对于dlmalloc而言,如果没有足够
+       空闲内存(本次测试中不可能有足够空闲内存), dlmalloc会直接调用
+       mmap进行内存分配, 相当与一次加解锁,一次系统调用的时间.而
+       tcmalloc依然向PH申请内存,当然PH也会直接从系统分配.
+
+   + 结论: (以下结论,只有1从图表中得出)
+     + 大量小内存请求的情况下,tcmalloc性能高于dlmalloc, 节省了加解锁的
+       时间.
+     + 如果只存在少量的内存请求,即使是小内存,从总的申请内存时间
+       上,dlmalloc会优于tcmalloc,原因是,在第一次内存申请时,tcmalloc初
+       始化的时间是dlmalloc的近10倍.
+     + 从代码中分析,tcmalloc的内存利用率小于dlmalloc,虽然,tcmalloc使用
+       了各种算法来提高内存利用率,但依然无法避免线程局部空间中的内存浪
+       费.
+
+   + 该测试的局限性:
+     + 由于该测试是连续内存申请之后,连续释放,所以无法测试申请已释放内
+       存的效率.但从代码上和tcmalloc/dlmalloc加解锁的机制上看,tcmalloc
+       依然会优于dlmalloc.
+     + 无法测试对于生命周期超长的进程,内存的碎片率.
 
 
 ** 草稿
@@ -240,7 +304,7 @@ void SizeMap::Init() {
   // Compute the size classes we want to use
   // 计算size classe 分类大小, 和对应的每个分类对应的
   // 计算结果如下:
-  // class 1 : 
+  // class 1 :
   int sc = 1;   // Next size class to assign
   int alignment = kAlignment;
   CHECK_CONDITION(kAlignment <= kMinAlign);
@@ -326,9 +390,9 @@ void SizeMap::Init() {
 }
 // line:  218
 #+END_SRC
-[[AlignmentForSize]]
+    [[AlignmentForSize]]
 
-#<<AlignmentForSize>>
+    #<<AlignmentForSize>>
 #+BEGIN_SRC cpp
 // kPageShift = 13
 // kNumClasses = 88
@@ -340,7 +404,7 @@ void SizeMap::Init() {
 // 计算结果如下:
 // size         alignment
 // >kMaxSize    kPageSize;
-// >=128        
+// >=128
 // >= 16        16
 // >= 8         8
 int AlignmentForSize(size_t size) {

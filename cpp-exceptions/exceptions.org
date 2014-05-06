@@ -7,21 +7,21 @@
    于缺少CPP中的exceptions类,我们只能时实现throw, try .. catch. 所以,
    重点就是介绍throw的实现和 try .. catch 的实现.
 
-*** throw的实现
-    一般的throw代码如下. 抛出一个异常对象. 所以, 首先throw需要分配内存
-    用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数__cxa_allocate_exception实现,这
-    个函数在libstdc++中可以找到.而执行例外handler的检索的动作
-    由__cxa_throw 实现.换句话说, throw 实际是调用到__cxa_throw 函数.
+** throw的实现
+   一般的throw代码如下. 抛出一个异常对象. 所以, 首先throw需要分配内存
+   用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数__cxa_allocate_exception实现,这
+   个函数在libstdc++中可以找到.而执行例外handler的检索的动作
+   由__cxa_throw 实现.换句话说, throw 实际是调用到__cxa_throw 函数.
 #+BEGIN_SRC cpp
 throw 0xff
 #+END_SRC
 
-*** exceptions安装(try .. catch ..) (SjLj篇)
-    SjLj是g++例外安装的一种实现方式, 可以通过'gcc --version', 查看是否
-    有'--enable-sjlj-exceptions'选项.在主流的gcc中,都是disable的. 所谓
-    的sjlj, 就是指利用setjmp/longjmp实现的异常处理方式.所以,所谓的
-    sjlj exceptions实际上就是类似C中用setjmp/longjmp实现的类似goto的清
-    理功能. exceptions实现如下:
+** exceptions安装(try .. catch ..) (SjLj篇)
+   SjLj是g++例外安装的一种实现方式, 可以通过'gcc --version', 查看是否
+   有'--enable-sjlj-exceptions'选项.在主流的gcc中,都是disable的. 所谓
+   的sjlj, 就是指利用setjmp/longjmp实现的异常处理方式.所以,所谓的
+   sjlj exceptions实际上就是类似C中用setjmp/longjmp实现的类似goto的清
+   理功能. exceptions实现如下:
     + 在线程的TLS中,存放全局的Context链表,该链表保存了所有catch的
       handler和相应的信息,包括jmp_buffer, error info等.
     + 在try时, 构造Context,并将jmp_buf, catch handler和相应信息存入
@@ -30,54 +30,119 @@ throw 0xff
       的catch handler, 然后调用longjmp, 跳转到对应的catch中执行.
     + 在catch执行完成后,清理handler或者重新安装.
 
+
+** exceptions安装(try .. catch ..) (WA2篇)
+    DW2 全称是 DWARF2, 指调试人已记录格式V2, 是用户调试的信息格式的规格.
+    而exceptions DW2 版是指,利用DW2的调试信息实现的exceptions跳转等动作.
+    一般时Unwind-dw2 实现.
+
+*** WA2预备知识.
+    提到调试信息,基本上不可避免地想到堆栈信息.而要打印堆栈信息,必须得
+    了解函数调用的一些规则和堆栈的结构.
+**** C 函数的调用和返回
+     首先,我们必须了解,编译器如何实现函数的调用和返回的.如果我们反汇编
+     果代码,所有未优化的情况下,函数的调用都是通过几个push指令和call指
+     令进行跳转. 所以,这里,编译器实际上是为每个函数建立了一个栈帧
+     (stack frame).stack frame中存放了以下数据信息:
+     1. 传递参数: 一般情况下,函数的调用参数是在该stack frame 最顶部.
+     2. 返回地址: 也就是return的地址,通常指向函数调用的下一个指令.
+     3. 调用者当前的栈指针: 用于恢复调用者现场
+     4. 函数内部的局部变量.
+
+        如下图:
+        [[图]]
+        #+BEGIN_SRC c
+void func_a(int args1, int args2)
+{
+        // ...
+        func_b(args1, args2);
+        int anything = 1;
+        // ...
+        return ;
+}
+
+void func_b(int args1, int args2)
+{
+        // ...
+        func_c(args1, args2);
+        int anything = 1;
+        // ...
+        return ;
+}
+        #+END_SRC
+     这里提下,调用约定.所谓调用约定,是指参数进栈的顺序,以及返回时,由谁
+     清理栈信息.C语言的参数进栈顺序是从右到左,由谁清理则可google "gcc 调
+     用约定".
+**** C++ 函数的调用和返回
+     这里为什么要把C++和C进行区分呢? 因为C++中存在异常处理!而异常处理
+     的引入,在编译器生成stack frame时,需要额外引入一些数据和规则.
+     我们先来看下面的图,和对应的跟异常相关的几个数据结构.
+     [[图]]
+
+     #+BEGIN_SRC cpp
+
+     #+END_SRC
+
+**** stack unwind
+     stack unwind 的主要功能是,在异常处理完成后,能够安全地析构生命周期
+     结束的所有资源.
+
+**** 异常抛出
+
+**** 异常捕获
+
+**** 开销计算
+
+
+
 *** exceptions安装(try .. catch ..) (DW2篇)
-DW2 全称是 DWARF2, 指调试人已记录格式V2, 是用户调试的信息格式的规格.
-而exceptions DW2 版是指,利用DW2的调试信息实现的exceptions跳转等动作.
-一般时Unwind-dw2 实现.
-上面是一个测试异常抛出程序的sections信息中unwind table index信息. 通过
-这个信息间接证明了我们系统是用DW2实现的异常处理.由于这些信息是在编译时
-就生成的,相对与SjLj,存在了一个优势,在未触发异常处理的情况下,异常对程序
-的运行没有额外的资源消耗.
-执行异常处理的流程:
-#+BEGIN_EXAMPLE
-Unwind table index '.ARM.exidx' at offset 0xc34 contains 8 entries:
+    DW2 全称是 DWARF2, 指调试人已记录格式V2, 是用户调试的信息格式的规格.
+    而exceptions DW2 版是指,利用DW2的调试信息实现的exceptions跳转等动作.
+    一般时Unwind-dw2 实现.
+    上面是一个测试异常抛出程序的sections信息中unwind table index信息. 通过
+    这个信息间接证明了我们系统是用DW2实现的异常处理.由于这些信息是在编译时
+    就生成的,相对与SjLj,存在了一个优势,在未触发异常处理的情况下,异常对程序
+    的运行没有额外的资源消耗.
+    执行异常处理的流程:
+    #+BEGIN_EXAMPLE
+    Unwind table index '.ARM.exidx' at offset 0xc34 contains 8 entries:
 
-0x850 <_Z3fucdd>: @0xb94
-  Compact model 1
-  0xc9 0x80 [unsupported two-byte opcode]
-  0xb1 0x08 pop {r3}
-  0x84 0x00 pop {r14}
+    0x850 <_Z3fucdd>: @0xb94
+    Compact model 1
+    0xc9 0x80 [unsupported two-byte opcode]
+    0xb1 0x08 pop {r3}
+    0x84 0x00 pop {r14}
 
-0x890 <_ZNSt9basic_iosIcSt11char_traitsIcEE8setstateEi>: @0xba0
-  Compact model 1
-  0xb1 0x08 pop {r3}
-  0x84 0x00 pop {r14}
-  0xb0      finish
-  0xb0      finish
+    0x890 <_ZNSt9basic_iosIcSt11char_traitsIcEE8setstateEi>: @0xba0
+    Compact model 1
+    0xb1 0x08 pop {r3}
+    0x84 0x00 pop {r14}
+    0xb0      finish
+    0xb0      finish
 
-0x8ac <_ZNSo5flushEv>: 0x80a8b0b0
-  Compact model 0
-  0xa8      pop {r4r14}
-  0xb0      finish
-  0xb0      finish
+    0x8ac <_ZNSo5flushEv>: 0x80a8b0b0
+    Compact model 0
+    0xa8      pop {r4r14}
+    0xb0      finish
+    0xb0      finish
 
-0x942 <_ZNSt4priv9__put_numIcSt11char_traitsIcEdEERSt13basic_ostreamIT_T0_ES7_T1_>: @0xbac
-  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+    0x942 <_ZNSt4priv9__put_numIcSt11char_traitsIcEdEERSt13basic_ostreamIT_T0_ES7_T1_>: @0xbac
+    Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
 
-0x9e8 <_ZNSo14_M_put_nowidenEPKc>: @0xbd8
-  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+    0x9e8 <_ZNSo14_M_put_nowidenEPKc>: @0xbd8
+    Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
 
-0xaae <_ZNSo3putEc>: @0xbf8
-  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+    0xaae <_ZNSo3putEc>: @0xbf8
+    Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
 
-0xb08 <main>: @0xc14
-  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+    0xb08 <main>: @0xc14
+    Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
 
-0xb94 <main+0x8c>: 0x1 [cantunwind]
+    0xb94 <main+0x8c>: 0x1 [cantunwind]
 
-Symbol table '.dynsym' contains 28 entries:
-   Num:    Value  Size Type    Bind   Vis      Ndx Name
-     0: 00000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+    Symbol table '.dynsym' contains 28 entries:
+    Num:    Value  Size Type    Bind   Vis      Ndx Name
+     0: 00000000     0 NOTYPE  LOCAL  DEFAULT  UND
      1: 00000000     0 FUNC    GLOBAL DEFAULT  UND __aeabi_unwind_cpp_pr0
      2: 00000000     0 FUNC    GLOBAL DEFAULT  UND strlen
      3: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZNSt6localeD1Ev
@@ -106,24 +171,24 @@ Symbol table '.dynsym' contains 28 entries:
     26: 00000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_end_catch
     27: 00000000     0 OBJECT  GLOBAL DEFAULT  UND _ZTId
 
-Relocation section '.rel.plt' at offset 0x6ac contains 15 entries:
- Offset     Info    Type                Sym. Value  Symbol's Name
-00002fc4  00001616 R_ARM_JUMP_SLOT        00000738   __libc_init
-00002fc8  00000216 R_ARM_JUMP_SLOT        00000000   strlen
-00002fcc  00000616 R_ARM_JUMP_SLOT        00000000   _ZNSt6localeC1ERKS_
-00002fd0  00000816 R_ARM_JUMP_SLOT        00000000   _ZNSt8ios_base16_M_throw_failureEv
-00002fd4  00001716 R_ARM_JUMP_SLOT        00000000   __cxa_allocate_exception
-00002fd8  00001816 R_ARM_JUMP_SLOT        00000000   __cxa_throw
-00002fdc  00001a16 R_ARM_JUMP_SLOT        00000000   __cxa_end_catch
-00002fe0  00000516 R_ARM_JUMP_SLOT        00000000   __cxa_end_cleanup
-00002fe4  00001916 R_ARM_JUMP_SLOT        00000000   __cxa_begin_catch
-00002fe8  00000c16 R_ARM_JUMP_SLOT        00000000   exit
-00002fec  00000416 R_ARM_JUMP_SLOT        00000000   __gxx_personality_v0
-00002ff0  00000316 R_ARM_JUMP_SLOT        00000000   _ZNSt6localeD1Ev
-00002ff4  00000f16 R_ARM_JUMP_SLOT        00000000   _ZSt18uncaught_exceptionv
-00002ff8  00000d16 R_ARM_JUMP_SLOT        00000000   _ZNSt4priv11_GetFacetIdEPKSt7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE
-00002ffc  00000716 R_ARM_JUMP_SLOT        00000000   _ZNKSt6locale12_M_use_facetERKNS_2idE
-#+END_EXAMPLE
+    Relocation section '.rel.plt' at offset 0x6ac contains 15 entries:
+    Offset     Info    Type                Sym. Value  Symbol's Name
+    00002fc4  00001616 R_ARM_JUMP_SLOT        00000738   __libc_init
+    00002fc8  00000216 R_ARM_JUMP_SLOT        00000000   strlen
+    00002fcc  00000616 R_ARM_JUMP_SLOT        00000000   _ZNSt6localeC1ERKS_
+    00002fd0  00000816 R_ARM_JUMP_SLOT        00000000   _ZNSt8ios_base16_M_throw_failureEv
+    00002fd4  00001716 R_ARM_JUMP_SLOT        00000000   __cxa_allocate_exception
+    00002fd8  00001816 R_ARM_JUMP_SLOT        00000000   __cxa_throw
+    00002fdc  00001a16 R_ARM_JUMP_SLOT        00000000   __cxa_end_catch
+    00002fe0  00000516 R_ARM_JUMP_SLOT        00000000   __cxa_end_cleanup
+    00002fe4  00001916 R_ARM_JUMP_SLOT        00000000   __cxa_begin_catch
+    00002fe8  00000c16 R_ARM_JUMP_SLOT        00000000   exit
+    00002fec  00000416 R_ARM_JUMP_SLOT        00000000   __gxx_personality_v0
+    00002ff0  00000316 R_ARM_JUMP_SLOT        00000000   _ZNSt6localeD1Ev
+    00002ff4  00000f16 R_ARM_JUMP_SLOT        00000000   _ZSt18uncaught_exceptionv
+    00002ff8  00000d16 R_ARM_JUMP_SLOT        00000000   _ZNSt4priv11_GetFacetIdEPKSt7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE
+    00002ffc  00000716 R_ARM_JUMP_SLOT        00000000   _ZNKSt6locale12_M_use_facetERKNS_2idE
+    #+END_EXAMPLE
 + 首先读出personality. personality是包含对应异常的似有数据信息,其中有
   异常类型.
 + 判定异常类型,
