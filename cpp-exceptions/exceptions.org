@@ -11,7 +11,7 @@
     一般的throw代码如下. 抛出一个异常对象. 所以, 首先throw需要分配内存
     用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数__cxa_allocate_exception实现,这
     个函数在libstdc++中可以找到.而执行例外handler的检索的动作
-    由__cxa_throw 实现.
+    由__cxa_throw 实现.换句话说, throw 实际是调用到__cxa_throw 函数.
 #+BEGIN_SRC cpp
 throw 0xff
 #+END_SRC
@@ -19,6 +19,111 @@ throw 0xff
 *** exceptions安装(try .. catch ..) (SjLj篇)
     SjLj是g++例外安装的一种实现方式, 可以通过'gcc --version', 查看是否
     有'--enable-sjlj-exceptions'选项.在主流的gcc中,都是disable的. 所谓
-    的sjlj, 就是指利用setjmp/longjmp实现的异常处理方式.
+    的sjlj, 就是指利用setjmp/longjmp实现的异常处理方式.所以,所谓的
+    sjlj exceptions实际上就是类似C中用setjmp/longjmp实现的类似goto的清
+    理功能. exceptions实现如下:
+    + 在线程的TLS中,存放全局的Context链表,该链表保存了所有catch的
+      handler和相应的信息,包括jmp_buffer, error info等.
+    + 在try时, 构造Context,并将jmp_buf, catch handler和相应信息存入
+      Context,并调用setjmp.
+    + 在throw时, 在throw中会获取全局的Context链表,查找能支持该错误类型
+      的catch handler, 然后调用longjmp, 跳转到对应的catch中执行.
+    + 在catch执行完成后,清理handler或者重新安装.
 
-*** exceptions安装(try .. catch ..) (WA2篇)
+*** exceptions安装(try .. catch ..) (DW2篇)
+DW2 全称是 DWARF2, 指调试人已记录格式V2, 是用户调试的信息格式的规格.
+而exceptions DW2 版是指,利用DW2的调试信息实现的exceptions跳转等动作.
+一般时Unwind-dw2 实现.
+上面是一个测试异常抛出程序的sections信息中unwind table index信息. 通过
+这个信息间接证明了我们系统是用DW2实现的异常处理.由于这些信息是在编译时
+就生成的,相对与SjLj,存在了一个优势,在未触发异常处理的情况下,异常对程序
+的运行没有额外的资源消耗.
+执行异常处理的流程:
+#+BEGIN_EXAMPLE
+Unwind table index '.ARM.exidx' at offset 0xc34 contains 8 entries:
+
+0x850 <_Z3fucdd>: @0xb94
+  Compact model 1
+  0xc9 0x80 [unsupported two-byte opcode]
+  0xb1 0x08 pop {r3}
+  0x84 0x00 pop {r14}
+
+0x890 <_ZNSt9basic_iosIcSt11char_traitsIcEE8setstateEi>: @0xba0
+  Compact model 1
+  0xb1 0x08 pop {r3}
+  0x84 0x00 pop {r14}
+  0xb0      finish
+  0xb0      finish
+
+0x8ac <_ZNSo5flushEv>: 0x80a8b0b0
+  Compact model 0
+  0xa8      pop {r4r14}
+  0xb0      finish
+  0xb0      finish
+
+0x942 <_ZNSt4priv9__put_numIcSt11char_traitsIcEdEERSt13basic_ostreamIT_T0_ES7_T1_>: @0xbac
+  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+
+0x9e8 <_ZNSo14_M_put_nowidenEPKc>: @0xbd8
+  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+
+0xaae <_ZNSo3putEc>: @0xbf8
+  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+
+0xb08 <main>: @0xc14
+  Personality routine: 0x7d4 <__aeabi_unwind_cpp_pr0+0x7d4>
+
+0xb94 <main+0x8c>: 0x1 [cantunwind]
+
+Symbol table '.dynsym' contains 28 entries:
+   Num:    Value  Size Type    Bind   Vis      Ndx Name
+     0: 00000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 00000000     0 FUNC    GLOBAL DEFAULT  UND __aeabi_unwind_cpp_pr0
+     2: 00000000     0 FUNC    GLOBAL DEFAULT  UND strlen
+     3: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZNSt6localeD1Ev
+     4: 00000000     0 FUNC    GLOBAL DEFAULT  UND __gxx_personality_v0
+     5: 00000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_end_cleanup
+     6: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZNSt6localeC1ERKS_
+     7: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZNKSt6locale12_M_use_facetERKNS_2idE
+     8: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZNSt8ios_base16_M_throw_failureEv
+     9: 00000000     0 OBJECT  GLOBAL DEFAULT  UND _ZSt4cout
+    10: 00000000     0 OBJECT  GLOBAL DEFAULT  UND _ZSt4cerr
+    11: 00003000     0 NOTYPE  GLOBAL DEFAULT   18 __dso_handle
+    12: 00000000     0 FUNC    GLOBAL DEFAULT  UND exit
+    13: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZNSt4priv11_GetFacetIdEPKSt7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE
+    14: 00001199   190 FUNC    WEAK   DEFAULT    8 _ZNSt4priv12__init_bostrIcSt11char_traitsIcEEEbRSt13basic_ostreamIT_T0_E
+    15: 00000000     0 FUNC    GLOBAL DEFAULT  UND _ZSt18uncaught_exceptionv
+    16: 00000d1d   266 FUNC    WEAK   DEFAULT    8 _ZNSt4priv9__put_numIcSt11char_traitsIcEdEERSt13basic_ostreamIT_T0_ES7_T1_
+    17: 00002e88     0 NOTYPE  GLOBAL DEFAULT   13 __INIT_ARRAY__
+    18: 00002e90     0 NOTYPE  GLOBAL DEFAULT   14 __FINI_ARRAY__
+    19: 00003000     0 NOTYPE  GLOBAL DEFAULT  ABS _edata
+    20: 00003000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_start
+    21: 00003010     0 NOTYPE  GLOBAL DEFAULT  ABS _end
+    22: 00000738     0 FUNC    GLOBAL DEFAULT  UND __libc_init
+    23: 00000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_allocate_exception
+    24: 00000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_throw
+    25: 00000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_begin_catch
+    26: 00000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_end_catch
+    27: 00000000     0 OBJECT  GLOBAL DEFAULT  UND _ZTId
+
+Relocation section '.rel.plt' at offset 0x6ac contains 15 entries:
+ Offset     Info    Type                Sym. Value  Symbol's Name
+00002fc4  00001616 R_ARM_JUMP_SLOT        00000738   __libc_init
+00002fc8  00000216 R_ARM_JUMP_SLOT        00000000   strlen
+00002fcc  00000616 R_ARM_JUMP_SLOT        00000000   _ZNSt6localeC1ERKS_
+00002fd0  00000816 R_ARM_JUMP_SLOT        00000000   _ZNSt8ios_base16_M_throw_failureEv
+00002fd4  00001716 R_ARM_JUMP_SLOT        00000000   __cxa_allocate_exception
+00002fd8  00001816 R_ARM_JUMP_SLOT        00000000   __cxa_throw
+00002fdc  00001a16 R_ARM_JUMP_SLOT        00000000   __cxa_end_catch
+00002fe0  00000516 R_ARM_JUMP_SLOT        00000000   __cxa_end_cleanup
+00002fe4  00001916 R_ARM_JUMP_SLOT        00000000   __cxa_begin_catch
+00002fe8  00000c16 R_ARM_JUMP_SLOT        00000000   exit
+00002fec  00000416 R_ARM_JUMP_SLOT        00000000   __gxx_personality_v0
+00002ff0  00000316 R_ARM_JUMP_SLOT        00000000   _ZNSt6localeD1Ev
+00002ff4  00000f16 R_ARM_JUMP_SLOT        00000000   _ZSt18uncaught_exceptionv
+00002ff8  00000d16 R_ARM_JUMP_SLOT        00000000   _ZNSt4priv11_GetFacetIdEPKSt7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE
+00002ffc  00000716 R_ARM_JUMP_SLOT        00000000   _ZNKSt6locale12_M_use_facetERKNS_2idE
+#+END_EXAMPLE
++ 首先读出personality. personality是包含对应异常的似有数据信息,其中有
+  异常类型.
++ 判定异常类型,
