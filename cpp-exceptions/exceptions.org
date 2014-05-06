@@ -50,34 +50,40 @@ throw 0xff
      4. 函数内部的局部变量.
 
         如下图:
-        [[图]]
-        #+BEGIN_SRC c
-void func_a(int args1, int args2)
-{
-        // ...
-        func_b(args1, args2);
-        int anything = 1;
-        // ...
-        return ;
-}
+        [[./x86_stack_frame.png]]
+        [[http://en.wikibooks.org/wiki/X86_Disassembly/Functions_and_Stack_Frames]]
 
-void func_b(int args1, int args2)
-{
-        // ...
-        func_c(args1, args2);
-        int anything = 1;
-        // ...
-        return ;
-}
-        #+END_SRC
+        arm stack frame
+     #+BEGIN_EXAMPLE
+     | X | RSA | push    {lr} | # Register Save Area, 保存将会被修改的寄存器值 |
+     | 20 | Locals and Temporaries | sub sp, #20  |  # 本地变量                                        |
+     | X | R0-R3 |              | # 少数情况下,会将R0-R3寄存器的值进栈, R0-R3保存函数参数.           |
+     #+END_EXAMPLE
+
+     #+BEGIN_SRC asm
+      // func call
+          res=fuc(2,3);
+  39c:   f04f 0002   mov.w   r0, #2
+  3a0:   f04f 0103   mov.w   r1, #3
+  3a4:   f7ff ffe4   bl  370 <fuc>
+
+      // function
+static int fuc(int x, int y) //定义函数
+ {   
+  370:   b500        push    {lr}
+  372:   b085        sub sp, #20
+
+     #+END_SRC
      这里提下,调用约定.所谓调用约定,是指参数进栈的顺序,以及返回时,由谁
-     清理栈信息.C语言的参数进栈顺序是从右到左,由谁清理则可google "gcc 调
+     清理栈信息.x86大部分调用约定时,C语言的参数进栈顺序是从右到左,由谁清理则可google "gcc 调
      用约定".
+     而在arm中,参数对应R0-R3, 从左到右对应.
+
 **** C++ 函数的调用和返回
      这里为什么要把C++和C进行区分呢? 因为C++中存在异常处理!而异常处理
      的引入,在编译器生成stack frame时,需要额外引入一些数据和规则.
      我们先来看下面的图,和对应的跟异常相关的几个数据结构.
-     [[图]]
+     []
 
      #+BEGIN_SRC cpp
 
