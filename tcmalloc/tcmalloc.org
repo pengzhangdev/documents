@@ -55,6 +55,44 @@
 
 **** TC向CC请求和释放内存
 
+***** CC的内存管理.
+      在CC中同样维护了与TC中对应的分类箱子.每个类别中是一个
+      CentralFreeList类. 该类中维护了一个slots双向链表, 用于快速分配内
+      存给CC并接收释放的内存.同样,该类中也维护了两个span双向链表,
+      empty(不包含空闲块)和nonempty(包含空闲块).
+      Span是个什么东西呢?它是PH内存管理的一个粒度,其表示的内存大小为
+      page(4K)的倍数.同时,它包含了更小的粒度单位objects. 所以,也可以认
+      为它是CC和PH之间移动的内存单元.
+      所以,Span和slots的关系是,spans可以拆分成slots
+
+      这里,我们认为span属于PH的,所以,跟span的相关操作我们在PH讲解.
+
+#+BEGIN_SRC cpp
+// Information kept for a span (a contiguous run of pages).
+struct Span {
+  PageID        start;          // Starting page number
+  Length        length;         // Number of pages in span
+  Span*         next;           // Used when in link list
+  Span*         prev;           // Used when in link list
+  void*         objects;        // Linked list of free objects
+  unsigned int  refcount : 16;  // Number of non-free objects // 当refcount为0, 则释放给PageHeap.
+  unsigned int  sizeclass : 8;  // Size-class for small objects (or 0)  // 这个是TC的 SizeClass 分类.因为每个分类对应一个CentralFreeList,每个List对应1个slots和2个spans. 所以,spans中的objects都统一属于某个SizeClass, 这里需要维护这个数据对object的.
+  unsigned int  location : 2;   // Is the span on a freelist, and if so, which?  // 在empty/nonempty list?
+  unsigned int  sample : 1;     // Sampled object?
+
+#undef SPAN_HISTORY
+#ifdef SPAN_HISTORY
+  // For debugging, we can keep a log events per span
+  int nexthistory;
+  char history[64];
+  int value[64];
+#endif
+
+  // What freelist the span is on: IN_USE if on none, or normal or returned
+  enum { IN_USE, ON_NORMAL_FREELIST, ON_RETURNED_FREELIST };
+};
+#+END_SRC
+
 ***** TC向CC请求内存
       TC只有在无法满足应用请求的情况下才会向CC申请内存. TC和CC之间的内
       存是批量移动的. 在某个类别无法满足请求的大小时,该类别会向CC申请内
@@ -139,6 +177,46 @@ void* ThreadCache::FetchFromCentralCache(size_t cl, size_t byte_size) {
 }
 #+END_SRC
 
+      这里实际从CC获取空闲空间的函数是RemoveRange函数.首先尝试直接从
+      slots中获取,如果slots不够,则再从spans获取.
+#+BEGIN_SRC cpp
+int CentralFreeList::RemoveRange(void **start, void **end, int N) {
+  ASSERT(N > 0);
+  lock_.Lock();
+  if (N == Static::sizemap()->num_objects_to_move(size_class_) &&
+      used_slots_ > 0) {
+    int slot = --used_slots_;
+    ASSERT(slot >= 0);
+    TCEntry *entry = &tc_slots_[slot];
+    *start = entry->head;
+    *end = entry->tail;
+    lock_.Unlock();
+    return N;
+  }
+
+  int result = 0;
+  void* head = NULL;
+  void* tail = NULL;
+  // TODO: Prefetch multiple TCEntries?
+  tail = FetchFromSpansSafe();
+  if (tail != NULL) {
+    SLL_SetNext(tail, NULL);
+    head = tail;
+    result = 1;
+    while (result < N) {
+      void *t = FetchFromSpans();
+      if (!t) break;
+      SLL_Push(&head, t);
+      result++;
+    }
+  }
+  lock_.Unlock();
+  *start = head;
+  *end = tail;
+  return result;
+}
+#+END_SRC
+
 #+BEGIN_SRC cpp
 int SizeMap::NumMoveSize(size_t size) {
   if (size == 0) return 0;
@@ -187,6 +265,52 @@ void ThreadCache::ListTooLong(FreeList* list, size_t cl) {
       list->set_length_overages(0);
     }
   }
+}
+#+END_SRC
+
+      ReleaseToCentralCache 中执行了,将链表返回给CC的动作,里面涉及到了
+      slots结构,我们来看下.
+#+BEGIN_SRC cpp
+// Remove some objects of class "cl" from thread heap and add to central cache
+void ThreadCache::ReleaseToCentralCache(FreeList* src, size_t cl, int N) {
+  ASSERT(src == &list_[cl]);
+  if (N > src->length()) N = src->length();
+  size_t delta_bytes = N * Static::sizemap()->ByteSizeForClass(cl);
+
+  // We return prepackaged chains of the correct size to the central cache.
+  // TODO: Use the same format internally in the thread caches?
+  int batch_size = Static::sizemap()->num_objects_to_move(cl);
+  while (N > batch_size) {
+    void *tail, *head;
+    src->PopRange(batch_size, &head, &tail);
+    Static::central_cache()[cl].InsertRange(head, tail, batch_size);
+    N -= batch_size;
+  }
+  void *tail, *head;
+  src->PopRange(N, &head, &tail);
+  Static::central_cache()[cl].InsertRange(head, tail, N);
+  size_ -= delta_bytes;
+}
+#+END_SRC
+
+      这个函数实际上是从TC释放到CC时调用.
+#+BEGIN_SRC cpp
+void CentralFreeList::InsertRange(void *start, void *end, int N) {
+  SpinLockHolder h(&lock_);
+  if (N == Static::sizemap()->num_objects_to_move(size_class_) &&
+    MakeCacheSpace()) {
+    // slots 是存在CC 的链表中的结构.
+    // 每个CC的链表节点是slots.
+    // 每个slots中的数据正好是TC中移动数据的大小.
+    int slot = used_slots_++;
+    ASSERT(slot >=0);
+    ASSERT(slot < max_cache_size_);
+    TCEntry *entry = &tc_slots_[slot];
+    entry->head = start;
+    entry->tail = end;
+    return;
+  }
+  ReleaseListToSpans(start);
 }
 #+END_SRC
 
@@ -270,6 +394,7 @@ void ThreadCache::IncreaseCacheLimitLocked() {
   }
 }
 #+END_SRC
+
 
 ** 代码review
 
