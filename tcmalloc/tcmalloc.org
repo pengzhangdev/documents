@@ -37,7 +37,239 @@
 *** 小对象内存分配
     [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/threadheap.gif]]
     上图为小内存管理时的sizemap分类的示意图.小内存的管理都处于
-    ThreadCache中.
+    ThreadCache中.所有对于256k以下的内存申请都是从TC中获取.
+    个人把小内存分配,理解为3级内存请求.进程向TC请求内存, TC向CC请求内
+    存,CC向PH请求内存.
+**** 进程向TC请求和释放内存内存
+     申请内存小于256K, 则优先尝试从TC中获取.
+     释放的内存的pageID属于TC时,并且TC的Heap存在,则释放到TC.
+
+     这里, 进程也有可能直接向CC或PH释放内存的.
+     如果pageID属于TC, 而TC中Heap为NULL(一般几乎不可能),则该内存直接释
+     放给CC.
+     如果pageID不属于TC,则在PH中查找,并释放给PH.(大内存的情况)
+
+***** 分类管理
+      如上图, 在TC中对内存进行了分类管理,每一个请求的内存大小都会向上
+      取整到对应分类,然后直接从对应的链表中取出一项.
+
+**** TC向CC请求和释放内存
+
+***** TC向CC请求内存
+      TC只有在无法满足应用请求的情况下才会向CC申请内存. TC和CC之间的内
+      存是批量移动的. 在某个类别无法满足请求的大小时,该类别会向CC申请内
+      存.
+#+BEGIN_SRC cpp
+inline void* ThreadCache::Allocate(size_t size, size_t cl) {
+  // size 已经被向上对齐, cl为分类的箱号
+  ASSERT(size <= kMaxSize);
+  // kMaxSzie == 256 * 1024
+  ASSERT(size == Static::sizemap()->ByteSizeForClass(cl));
+  // sizemap() 为分类的数组.每个成员为链表.
+  // ByteSizeForClass是取出对应箱号内的理论内存大小.
+
+  // 以上assert 检查,理应在调用该函数之前保证.
+
+  FreeList* list = &list_[cl];
+  if (list->empty()) {
+    return FetchFromCentralCache(cl, size);
+  }
+  size_ -= size;
+  return list->Pop();
+}
+#+END_SRC
+
+      我们重点描述下,TC向CC申请内存的过程.首先,我们需要知道,CC也按照TC
+      的内存分类方式,存在各个分类的箱子. 所以,实际上是向CC中的对应分类
+      获取一连串的空闲内存.
+      首先,我们得确定,移动的内存数量,也就是对应分类的内存块个数.默认情
+      况下, 有一个规则确定每个分类对应的该移动的内存数量.以64K为基准,除
+      以对应分类的内存大小,算出来的为移动的内存数量.但是,对于一些极小内
+      存,这个值将很大,所以,我们限制最大为64个,同理,对于极大内存,这个值
+      <=1,会导致这个分类的内存请求每次都向CC请求,所以,我们这只最小为2,
+      保证最多每2次向CC请求一次内存.下面为,默认的分类和对应的移动数量.
+      #+BEGIN_EXAMPLE
+        class           num_to_move
+      #+END_EXAMPLE
+      以上只是默认值,这个值是会随着内存申请次数的增加而调整, google给这
+      个算法取名为慢启动(slow-start)算法. 我们来看下.首先, list有个最大值,
+      我们能移动的大小为list最大长度和默认中的最小值. 为了保证,在大量申
+      请时的效率, 在max length < 默认值时,我们慢慢增长max length, 防止
+      浪费空间,又能有效地逐渐提高效率. 在max length > 默认值时, 要么时
+      大量请求,要么是由于请求的内存很大,导致默认值小,所以,这个时候,可以
+      每次增加默认值大小.但最大移动数依然时默认的移动数.
+
+#+BEGIN_SRC cpp
+// Remove some objects of class "cl" from central cache and add to thread heap.
+// On success, return the first object for immediate use; otherwise return NULL.
+void* ThreadCache::FetchFromCentralCache(size_t cl, size_t byte_size) {
+  FreeList* list = &list_[cl];
+  ASSERT(list->empty());
+  // batch_size 为默认的移动数量
+  const int batch_size = Static::sizemap()->num_objects_to_move(cl);
+
+  // 考虑到list的大小,我们取list最大长度和batch_size中的最小值.
+  const int num_to_move = min<int>(list->max_length(), batch_size);
+  void *start, *end;
+  // 从CC获取内存, 只是简单的链表删除操作
+  int fetch_count = Static::central_cache()[cl].RemoveRange(
+      &start, &end, num_to_move);
+
+  ASSERT((start == NULL) == (fetch_count == 0));
+  if (--fetch_count >= 0) {
+    // size_为获取到的内存大小
+    size_ += byte_size * fetch_count;
+    // 添加到单向链表中.链表插入操作.
+    list->PushRange(fetch_count, SLL_Next(start), end);
+  }
+
+  // 如果list的最大长度 < 默认移动长度, 则list最大长度+1, 慢慢靠近默认移动长度.
+  if (list->max_length() < batch_size) {
+    list->set_max_length(list->max_length() + 1);
+  } else {
+    // 否则,我们直接增长batch_size 长度, 当然不允许无限增长.
+    int new_length = min<int>(list->max_length() + batch_size,
+                              kMaxDynamicFreeListLength);
+    // 必须保证max_length 时batch_size的整数倍,这样才能做到在N次batch_size的移动正好释放完list, 而不需要分割.
+    new_length -= new_length % batch_size;
+    ASSERT(new_length % batch_size == 0);
+    list->set_max_length(new_length);
+  }
+  return start;
+}
+#+END_SRC
+
+#+BEGIN_SRC cpp
+int SizeMap::NumMoveSize(size_t size) {
+  if (size == 0) return 0;
+
+  int num = static_cast<int>(64.0 * 1024.0 / size);
+  if (num < 2) num = 2;
+
+  if (num > FLAGS_tcmalloc_transfer_num_objects)
+    num = FLAGS_tcmalloc_transfer_num_objects;
+
+  return num;
+}
+#+END_SRC
+
+***** TC向CC释放内存
+      TC释放内存的触发条件是, 进程向TC释放内存并且(TC的size >
+      max_size 或者 某个list的length > max_length). 在以上两种情况下,
+      分别触发ListTooLong 函数释放list和Scavenge 释放整个TC空间.
+      ListTooLong 释放内存的规则时,如果小于batch_size, 则清空链表,否则
+      释放batch_size.一般会触发清空链表的话,也就意味着,这个线程基本不
+      申请内存, 所以直接释放所有基本不影响效率.
+      Scavenge 是通过编译TC中的所有类别链表,并释放内存实现内存回收.这
+      里有个标准, lowwatermark. 在TC中lowwatermark是每个链表曾经最短的
+      长度. 这个值不会增加,增加的情况只有是Scavenge被调用时,被设置为当
+      前的长度, 而在list长度小于lowwatermark时,就会被持续递减.对于
+      lowwatermark大于0的链表,将lowwatermark/2 的大小还给CC,并将该链表
+      的最大值,设置低于batch_size,从而使其使用慢启动算法增加内存,减少
+      内存浪费的情况.
+
+#+BEGIN_SRC cpp
+void ThreadCache::ListTooLong(FreeList* list, size_t cl) {
+  const int batch_size = Static::sizemap()->num_objects_to_move(cl);
+  // 如果list长度小于 batch_size, 释放所有, 否则, 释放batch_size个块.
+  ReleaseToCentralCache(list, cl, batch_size);
+
+  if (list->max_length() < batch_size) {
+    // Slow start the max_length so we don't overreserve.
+    list->set_max_length(list->max_length() + 1);
+  } else if (list->max_length() > batch_size) {
+    // If we consistently go over max_length, shrink max_length.  If we don't
+    // shrink it, some amount of memory will always stay in this freelist.
+    list->set_length_overages(list->length_overages() + 1);
+    if (list->length_overages() > kMaxOverages) {
+      ASSERT(list->max_length() > batch_size);
+      list->set_max_length(list->max_length() - batch_size);
+      list->set_length_overages(0);
+    }
+  }
+}
+#+END_SRC
+
+#+BEGIN_SRC cpp
+void ThreadCache::Scavenge() {
+  // If the low-water mark for the free list is L, it means we would
+  // not have had to allocate anything from the central cache even if
+  // we had reduced the free list size by L.  We aim to get closer to
+  // that situation by dropping L/2 nodes from the free list.  This
+  // may not release much memory, but if so we will call scavenge again
+  // pretty soon and the low-water marks will be high on that call.
+  //int64 start = CycleClock::Now();
+  for (int cl = 0; cl < kNumClasses; cl++) {
+    FreeList* list = &list_[cl];
+    const int lowmark = list->lowwatermark();
+    // 首先清理 lowmark > 0 的.就算某些lowmark值不对, 在该轮结束后,会通过clear_lowwatermark()重置,下一次将会成功释放大量内存.
+    if (lowmark > 0) {
+      const int drop = (lowmark > 1) ? lowmark/2 : 1;
+      ReleaseToCentralCache(list, cl, drop);
+
+      // Shrink the max length if it isn't used.  Only shrink down to
+      // batch_size -- if the thread was active enough to get the max_length
+      // above batch_size, it will likely be that active again.  If
+      // max_length shinks below batch_size, the thread will have to
+      // go through the slow-start behavior again.  The slow-start is useful
+      // mainly for threads that stay relatively idle for their entire
+      // lifetime.
+      // 由于该TC内存快满了,所以,我们减少batch_size, 减慢慢启动算法,保证空间不会浪费太多.
+      const int batch_size = Static::sizemap()->num_objects_to_move(cl);
+      if (list->max_length() > batch_size) {
+        list->set_max_length(
+            max<int>(list->max_length() - batch_size, batch_size)); // 减少后和batch_size中的最大值.
+      }
+    }
+    list->clear_lowwatermark();  //清理低水平标志位.其实就是设置为当前长度...
+  }
+  // 无耻地偷取其他线程的容量.
+  IncreaseCacheLimit();
+}
+#+END_SRC
+
+      以上是内存释放的情况,还有个保证自己线程容量充裕的无耻做法是,偷取其他线
+      程的容量.偷取临近10个TC的 1 << 16容量. 当然,如果其容量小于最小值,就
+      放过了．也就是说,对于很少启动慢启动的线程,其线程容量将会由于被偷
+      取而持续减少, 有效控制了这种线程内存的浪费. 通过这种机制,有效地保
+      证进程间空间不会浪费太多. 需求大的线程可以获得更多的容量,而需求
+      小的线程获取少的容量.
+      如果存在无人认领的内存,咱们就偷了!!所谓无人认领的内存,是指线程被
+      释放后, 其释放的内存.
+
+#+BEGIN_SRC cpp
+void ThreadCache::IncreaseCacheLimitLocked() {
+  if (unclaimed_cache_space_ > 0) {
+    // Possibly make unclaimed_cache_space_ negative.
+    unclaimed_cache_space_ -= kStealAmount;
+    max_size_ += kStealAmount;
+    return;
+  }
+  // Don't hold pageheap_lock too long.  Try to steal from 10 other
+  // threads before giving up.  The i < 10 condition also prevents an
+  // infinite loop in case none of the existing thread heaps are
+  // suitable places to steal from.
+  for (int i = 0; i < 10;
+       ++i, next_memory_steal_ = next_memory_steal_->next_) {
+    // Reached the end of the linked list.  Start at the beginning.
+    if (next_memory_steal_ == NULL) {
+      ASSERT(thread_heaps_ != NULL);
+      // next_memory_steal_ 在初始化时默认为TC的Heap的链表头.
+      // 所以,这个循环会不停轮流偷取链表里的所有线程,包括自己.
+      next_memory_steal_ = thread_heaps_;
+    }
+    if (next_memory_steal_ == this ||
+        next_memory_steal_->max_size_ <= kMinThreadCacheSize) {
+      continue;
+    }
+    next_memory_steal_->max_size_ -= kStealAmount;
+    max_size_ += kStealAmount;
+
+    next_memory_steal_ = next_memory_steal_->next_;
+    return;
+  }
+}
+#+END_SRC
 
 ** 代码review
 
