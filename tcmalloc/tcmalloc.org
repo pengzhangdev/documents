@@ -12,7 +12,7 @@
 
 *** overview
 
-    [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/overview.gif]]
+    [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/tcmalloc.png]]
 
 
     tcmalloc为每一个线程分配一个线程本地缓存(Thread Cache)．所有小对象
@@ -36,36 +36,77 @@
 
 *** 小对象内存分配
     [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/threadheap.gif]]
+
     上图为小内存管理时的sizemap分类的示意图.小内存的管理都处于
     ThreadCache中.所有对于256k以下的内存申请都是从TC中获取.
     个人把小内存分配,理解为3级内存请求.进程向TC请求内存, TC向CC请求内
     存,CC向PH请求内存.
+
 **** 进程向TC请求和释放内存内存
-     申请内存小于256K, 则优先尝试从TC中获取.
-     释放的内存的pageID属于TC时,并且TC的Heap存在,则释放到TC.
 
-     这里, 进程也有可能直接向CC或PH释放内存的.
-     如果pageID属于TC, 而TC中Heap为NULL(一般几乎不可能),则该内存直接释
-     放给CC.
-     如果pageID不属于TC,则在PH中查找,并释放给PH.(大内存的情况)
-
-***** 分类管理
+***** TC内存管理
+      首先, 在进程空间中,对于每一个线程,存在与其对应的TC, 所有的TC被用
+      链表串联,不属于任何一个线程独有.通过这种,每一个TC都可以看到任何
+      一个TC.
       如上图, 在TC中对内存进行了分类管理,每一个请求的内存大小都会向上
       取整到对应分类,然后直接从对应的链表中取出一项.
+
+
+***** 进程向TC申请内存
+
+      + 将请求内存向上对其到size class.
+      + 从对应size class中查找空闲内存, 如果存在,直接返回.
+      + 如果size class中无空闲内存,则触发向TC请求内存的机制.
+
+***** 进程向TC释放内存
+
+      + 从释放内存的地址,查找对应的pageID.
+      + 如果page ID 属于TC, 并且TC的Heap存在,则释放到TC中
+      + 如果PageID属于TC, 而TC的Heap不存在(跨线程内存申请和释放, 申请
+        线程被销毁的情况下),则释放到CC中, 参考TC向CC释放内存
+      + 如果pageID属于PH中(大内存), 则直接释放到PH中.
+
 
 **** TC向CC请求和释放内存
 
 ***** CC的内存管理.
       在CC中同样维护了与TC中对应的分类箱子.每个类别中是一个
       CentralFreeList类. 该类中维护了一个slots双向链表, 用于快速分配内
-      存给CC并接收释放的内存.同样,该类中也维护了两个span双向链表,
-      empty(不包含空闲块)和nonempty(包含空闲块).
+      存给CC并接收释放的内存, 其内存粒度与TC中相同.同样,该类中也维护了两个span双向链表,
+      empty(不包含空闲块)和nonempty(包含空闲块).span会在这两个链表中移
+      动.
       Span是个什么东西呢?它是PH内存管理的一个粒度,其表示的内存大小为
       page(4K)的倍数.同时,它包含了更小的粒度单位objects. 所以,也可以认
       为它是CC和PH之间移动的内存单元.
       所以,Span和slots的关系是,spans可以拆分成slots
 
       这里,我们认为span属于PH的,所以,跟span的相关操作我们在PH讲解.
+
+
+#+BEGIN_SRC cpp
+class CentralFreeList {
+   // ...
+
+private:
+   //...
+
+  // We keep linked lists of empty and non-empty spans.
+  size_t   size_class_;     // My size class
+  Span     empty_;          // Dummy header for list of empty spans
+  Span     nonempty_;       // Dummy header for list of non-empty spans
+  size_t   num_spans_;      // Number of spans in empty_ plus nonempty_
+  size_t   counter_;        // Number of free objects in cache entry
+
+  // Here we reserve space for TCEntry cache slots.  Space is preallocated
+  // for the largest possible number of entries than any one size class may
+  // accumulate.  Not all size classes are allowed to accumulate
+  // kMaxNumTransferEntries, so there is some wasted space for those size
+  // classes.
+  TCEntry tc_slots_[kMaxNumTransferEntries];
+
+  // ...
+};
+#+END_SRC
 
 #+BEGIN_SRC cpp
 // Information kept for a span (a contiguous run of pages).
@@ -94,9 +135,16 @@ struct Span {
 #+END_SRC
 
 ***** TC向CC请求内存
-      TC只有在无法满足应用请求的情况下才会向CC申请内存. TC和CC之间的内
-      存是批量移动的. 在某个类别无法满足请求的大小时,该类别会向CC申请内
-      存.
+      TC只有在其对应的分类中,不存在空闲块时,才会向CC的对应分类申请
+      batch_size的空闲块.
+      + 根据当前请求的内存,找到对应的分类,和该分类下的默认向CC请求的对
+        象个数(batch_size). 在该分类free list的最大长度和batch_size中
+        取最小值为需要申请的对象个数(num_to_move).
+      + 基于慢启动算法,缓慢增加当前分类的free list容量.
+      + 从CC的对应分类中的slots对像,获取相应数量的objects.
+      + 如果slots不满足,则从spans对象中获取相应的objects.
+      + 如果spans不满足(nonempty 为NULL),则触发CC向PH请求内存.
+
 #+BEGIN_SRC cpp
 inline void* ThreadCache::Allocate(size_t size, size_t cl) {
   // size 已经被向上对齐, cl为分类的箱号
@@ -123,11 +171,98 @@ inline void* ThreadCache::Allocate(size_t size, size_t cl) {
       首先,我们得确定,移动的内存数量,也就是对应分类的内存块个数.默认情
       况下, 有一个规则确定每个分类对应的该移动的内存数量.以64K为基准,除
       以对应分类的内存大小,算出来的为移动的内存数量.但是,对于一些极小内
-      存,这个值将很大,所以,我们限制最大为64个,同理,对于极大内存,这个值
+      存,这个值将很大,所以,我们限制最大为32768个,同理,对于极大内存,这个值
       <=1,会导致这个分类的内存请求每次都向CC请求,所以,我们这只最小为2,
       保证最多每2次向CC请求一次内存.下面为,默认的分类和对应的移动数量.
       #+BEGIN_EXAMPLE
-        class           num_to_move
+      idx : class_size : num_to_move_objs : num_to_move_pages
+      1 : 8 : 8192 : 2
+      2 : 16 : 4096 : 2
+      3 : 32 : 2048 : 2
+      4 : 48 : 1365 : 2
+      5 : 64 : 1024 : 2
+      6 : 80 : 819 : 2
+      7 : 96 : 682 : 2
+      8 : 112 : 585 : 2
+      9 : 128 : 512 : 2
+      10 : 144 : 455 : 2
+      11 : 160 : 409 : 2
+      12 : 176 : 372 : 2
+      13 : 192 : 341 : 2
+      14 : 208 : 315 : 2
+      15 : 224 : 292 : 2
+      16 : 240 : 273 : 2
+      17 : 256 : 256 : 2
+      18 : 288 : 227 : 2
+      19 : 320 : 204 : 2
+      20 : 352 : 186 : 2
+      21 : 384 : 170 : 2
+      22 : 416 : 157 : 2
+      23 : 448 : 146 : 2
+      24 : 480 : 136 : 2
+      25 : 512 : 128 : 2
+      26 : 576 : 113 : 2
+      27 : 640 : 102 : 2
+      28 : 704 : 93 : 2
+      29 : 768 : 85 : 2
+      30 : 832 : 78 : 2
+      31 : 896 : 73 : 2
+      32 : 960 : 68 : 2
+      33 : 1024 : 64 : 2
+      34 : 1152 : 56 : 2
+      35 : 1280 : 51 : 2
+      36 : 1408 : 46 : 2
+      37 : 1536 : 42 : 2
+      38 : 1792 : 36 : 2
+      39 : 2048 : 32 : 2
+      40 : 2304 : 28 : 2
+      41 : 2560 : 25 : 2
+      42 : 2816 : 23 : 3
+      43 : 3072 : 21 : 2
+      44 : 3328 : 19 : 3
+      45 : 4096 : 16 : 2
+      46 : 4608 : 14 : 3
+      47 : 5120 : 12 : 2
+      48 : 6144 : 10 : 3
+      49 : 6656 : 9 : 5
+      50 : 8192 : 8 : 2
+      51 : 9216 : 7 : 5
+      52 : 10240 : 6 : 4
+      53 : 12288 : 5 : 3
+      54 : 13312 : 4 : 5
+      55 : 16384 : 4 : 2
+      56 : 20480 : 3 : 5
+      57 : 24576 : 2 : 3
+      58 : 26624 : 2 : 7
+      59 : 32768 : 2 : 4
+      60 : 40960 : 2 : 5
+      61 : 49152 : 2 : 6
+      62 : 57344 : 2 : 7
+      63 : 65536 : 2 : 8
+      64 : 73728 : 2 : 9
+      65 : 81920 : 2 : 10
+      66 : 90112 : 2 : 11
+      67 : 98304 : 2 : 12
+      68 : 106496 : 2 : 13
+      69 : 114688 : 2 : 14
+      70 : 122880 : 2 : 15
+      71 : 131072 : 2 : 16
+      72 : 139264 : 2 : 17
+      73 : 147456 : 2 : 18
+      74 : 155648 : 2 : 19
+      75 : 163840 : 2 : 20
+      76 : 172032 : 2 : 21
+      77 : 180224 : 2 : 22
+      78 : 188416 : 2 : 23
+      79 : 196608 : 2 : 24
+      80 : 204800 : 2 : 25
+      81 : 212992 : 2 : 26
+      82 : 221184 : 2 : 27
+      83 : 229376 : 2 : 28
+      84 : 237568 : 2 : 29
+      85 : 245760 : 2 : 30
+      86 : 253952 : 2 : 31
+      87 : 262144 : 2 : 32
       #+END_EXAMPLE
       以上只是默认值,这个值是会随着内存申请次数的增加而调整, google给这
       个算法取名为慢启动(slow-start)算法. 我们来看下.首先, list有个最大值,
@@ -232,19 +367,32 @@ int SizeMap::NumMoveSize(size_t size) {
 #+END_SRC
 
 ***** TC向CC释放内存
-      TC释放内存的触发条件是, 进程向TC释放内存并且(TC的size >
-      max_size 或者 某个list的length > max_length). 在以上两种情况下,
-      分别触发ListTooLong 函数释放list和Scavenge 释放整个TC空间.
-      ListTooLong 释放内存的规则时,如果小于batch_size, 则清空链表,否则
-      释放batch_size.一般会触发清空链表的话,也就意味着,这个线程基本不
-      申请内存, 所以直接释放所有基本不影响效率.
-      Scavenge 是通过编译TC中的所有类别链表,并释放内存实现内存回收.这
-      里有个标准, lowwatermark. 在TC中lowwatermark是每个链表曾经最短的
-      长度. 这个值不会增加,增加的情况只有是Scavenge被调用时,被设置为当
-      前的长度, 而在list长度小于lowwatermark时,就会被持续递减.对于
-      lowwatermark大于0的链表,将lowwatermark/2 的大小还给CC,并将该链表
-      的最大值,设置低于batch_size,从而使其使用慢启动算法增加内存,减少
-      内存浪费的情况.
+      TC向CC释放内存的条件是,在进程向TC释放内存时, TC对应的分类free
+      list的length > max\_length 或者 TC的总size > max\_size, 分别触发
+      ListTooLong和Scavenge内存回收.
+
+      ListTooLong 回收内存规则:
+      + 如果list length < batch\_size , 则清空链表. 这种情况下,只有非频
+        繁内存请求,才会length < batch\_size, 所以, 在时间和空间上,考虑
+        优先空间,释放内存.
+      + 如果list length > batch\_size, 则释放batch_size个object.并且减
+        少list的max length, 尽可能利用慢启动, 减少空间浪费的问题.
+
+      Scavenge回收内存规则:
+      + 遍历TC中所有的free list, 将lowwatermark > 0 的list 释放
+        lowwatermark / 2 个objects.
+      + 如果lowwatermark > 0的list length > batch\_size, 则更新
+        max\_length 为 max\_length - batch\_size, 利用慢启动算法,减慢内存增长的速度.
+      + 重置所有list的 lowwatermark为当前的length. (lowwatermark会在
+        list的length减小时更新,始终保持为list最小的length).
+      + 偷取其他TC的max\_length. 由于当前TC容量不够,所以,偷取其他TC的容
+        量,保证无用线程不会浪费过多空间.
+
+      TC容量偷取:
+      + 如果存在无人认领的内存(无人认领内存: 线程结束后(TC的Heap被释放)的
+        内存), 则优先从其领取需要的内存,增大当前线程的容量.
+      + 上述条件不满足,则遍历所有的TC, 如果某个TC的容量 >
+        kMinThreadCacheSize (kMaxSize * 2 = 512K) , 则偷取其容量.
 
 #+BEGIN_SRC cpp
 void ThreadCache::ListTooLong(FreeList* list, size_t cl) {
@@ -395,6 +543,76 @@ void ThreadCache::IncreaseCacheLimitLocked() {
 }
 #+END_SRC
 
+**** CC向PH 申请和释放内存
+
+***** PH的内存管理
+      PH的管理,跟TC一样也是进行了分类,挺复杂的.首先, 所有的内存,映射到
+      进程空间的内存,都会占据着PH中的某个list. PH的内存是直接从系统的
+      sbrk或者mmap分配的.同样, 大内存也是从PH分配的,所以,它很复杂!
+
+      PH的分类,是按page数量进行. free\_ 从 0 - kMaxPages, 每个数组成员
+      包含数组下标个pages, 也就是free\_\[1\] 包含1个page长度的Spans.每
+      个数组成员包含2个双向环形链表normal和returned.而大于kMaxPages的
+      归属到large_ 中.
+
+      对于span, span中objects的地址和 span的PageID之间, 在PH中存在相应的算法进
+      行映射. PageMap 是一个基数树(radix tree), 能将某个地址映射到对应
+      的span. 而PageMapCache能将对应的PageId映射到其size class.
+
+#+BEGIN_SRC cpp
+  // We segregate spans of a given size into two circular linked
+  // lists: one for normal spans, and one for spans whose memory
+  // has been returned to the system.
+  struct SpanList {
+    Span        normal;    // 存放被映射到进程空间的spans..
+    Span        returned;  // 存放已经被释放回系统的spans..(?)
+  };
+
+  // List of free spans of length >= kMaxPages
+  SpanList large_; // 所有> 128 pages的spans, 都归属到该list
+
+  // Array mapping from span length to a doubly linked list of free spans
+  SpanList free_[kMaxPages]; // kMaxPages = 1 << (20 - kPageShift) (= 128); 也就是说有128个分类.
+#+END_SRC
+
+***** CC 向PH 内存申请
+      CC向PH申请内存的条件是, 当前CentralFreeList中空闲span不够.
+      所有向PH申请的内存都是Page的N倍,所以,参数是
+      N. PageHeap::New(Length n).
+      + 首先, 搜索所有 >= N (N <= kMaxPages)的free list, 查找最符合要
+        求的span.如果找到,则直接从双向链表中删除. 如果span比要求的大,
+        则切分(Carve),将剩下的新申请一个span,放入对应的size class中.这
+        种算法查找最适合的,但会导致地址不连续.
+      + 如果所有的free list中没有匹配的,则遍历large list.由于large
+        list中是未排序的,所以,在搜索时,需要不停地记录最接近请求大小的
+        span.所以该算法是O(n), 费时.
+      + 如果以上查找都失败,则PH就向系统申请N pages 并存入对应的size
+        class.然后从头开始.如果申请失败,则返回NULL.
+
+***** CC 向PH 释放内存
+      CC向PH释放内存的条件是, slots满,并且span中objects全部回收
+      (refcount为0).
+      前文提到,CC和PH之间移动的单位时span, 所以, 释放时需要的参数就是
+      span.PageHeap::Delete(Span* span). 该函数的作用就是将释放的内存
+      与其前后空闲内存合并,插入size class.
+      + 首先,从PageMap获取到相连的span, 如果它们都是空闲的,则进行合并.
+      + 将合并后的新span或者不需要合并的span插入对应的free list中.
+      + PageHeap检查是否需要释放内存到系统.这里释放的机制与TC释放的机
+        制有点不同,不会针对某个分类大小进行释放,而是针对整个PH进行释放.
+
+*** 大对象内存分配
+    在分析小内存时,在请求内存数 > kMaxSize(256k)时, 则执行大内存分配.大
+    内存的分配某些规则与CC向PH申请内存一样.
+    + 根据请求大小,对齐到PH的分类中最接近的大小, 获取到num\_pages.
+    + 执行PageHeap::New(Length n), 与CC向PH申请内存一样.
+
+    而内存释放, 我们在小内存时,已经提到. 并且,其行为跟CC向PH释放内存逻
+    辑一样.
+    + 根据被释放的内存, 获取其pageID.
+    + 如果pageID属于span, 则调用PageHeap::Delete(Span* span).
+
+*** 算法
+    radix tree, 基数树算法
 
 ** 代码review
 
