@@ -14,7 +14,6 @@
 
     [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/tcmalloc.png]]
 
-
     tcmalloc为每一个线程分配一个线程本地缓存(Thread Cache)．所有小对象
     (<256K)都会优先从Thread Cache分配．而当Thread Cache没有足够空闲内
     存时，就会从Central Heap申请内存. 而当Thread Cache内存富裕时,会将
