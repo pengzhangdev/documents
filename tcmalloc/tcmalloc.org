@@ -1,3 +1,6 @@
+#+AUTHOR:    Peng Zhang
+#+EMAIL:     pengzhangdev@gmail.com
+
 * tcmalloc2.1 浅析
 
 ** 简介
@@ -271,16 +274,16 @@ inline void* ThreadCache::Allocate(size_t size, size_t cl) {
       大量请求,要么是由于请求的内存很大,导致默认值小,所以,这个时候,可以
       每次增加默认值大小.但最大移动数依然时默认的移动数.
 
-#+BEGIN_EXAMPLE
-// slow-start 
-        (set batch_size num_to_move)
-        (set list_length get_list_length_max_length)
+#+BEGIN_SRC clisp
+// slow-start
+        (setq batch_size num_to_move)
+        (setq list_length get_list_length_max_length)
         (fetch-mem (min batch_size list_length))
         (set-list-max-length 
                 (if (< list_length batch_size)
                        (+ list_length 1)
                       (+ list_length batch_size)))
-#+END_EXAMPLE
+#+END_SRC
 
 #+BEGIN_SRC cpp
 // Remove some objects of class "cl" from central cache and add to thread heap.
@@ -563,7 +566,24 @@ void ThreadCache::IncreaseCacheLimitLocked() {
       PH的分类,是按page数量进行. free\_ 从 0 - kMaxPages, 每个数组成员
       包含数组下标个pages, 也就是free\_[1\] 包含1个page长度的Spans.每
       个数组成员包含2个双向环形链表normal和returned.而大于kMaxPages的
-      归属到large_ 中.
+      归属到large\_ 中.
+
+      normal: 存放空闲的span list.
+      returned: 存放通过madvise的MADV_FREE 方式释放的span.前提时系统支
+      持MADV\_FREE 否则就不释放内存...
+
+      所谓madvise的MADV\_FREE 释放内存, 是内核实现的一种lazy free方式.
+      在process通过madvise MADV\_FREE 方式通知kernel, 某段pages中的数据
+      不再使用了, 如果kernel需要,可以清楚.如果process先于kernel再次访
+      问了该区域,process可以快速获取到该位置的原先数据. 如果kernel先于
+      process需要该pages,则当process访问时,会获得被清空的pages.
+
+      如果我们系统不支持MADV\_FREE, 则使用
+      MADV\_DONTNEED. MADV\_DONTNEED与MADV\_FREE的区别在于,
+      MADV\_DONTNEED的情况下,不管什么情况下再次访问这段pages, 获得的总
+      是被清0的内存区域.
+
+      [[http://www.gossamer-threads.com/lists/linux/kernel/762930][more info about MADV\_FREE and MADV\_DONTNEED]]
 
       对于span, span中objects的地址和 span的PageID之间, 在PH中存在相应的算法进
       行映射. PageMap 是一个基数树(radix tree), 能将某个地址映射到对应
@@ -598,6 +618,200 @@ void ThreadCache::IncreaseCacheLimitLocked() {
         span.所以该算法是O(n), 费时.
       + 如果以上查找都失败,则PH就向系统申请N pages 并存入对应的size
         class.然后从头开始.如果申请失败,则返回NULL.
+
+
+      我们延续之前TC向CC请求内存时的情况, 在slots不够时,会向spans请求.如
+      下代码:
+#+BEGIN_SRC cpp
+void* CentralFreeList::FetchFromSpansSafe() {
+  // 第一次尝试,如果失败,则意味着spans空间不够,需要向PH申请内存.
+  void *t = FetchFromSpans();
+  if (!t) {
+    // 向PH申请内存,并划分获取的spans,用于该分类的slots.
+    Populate();
+    // 再次尝试获取objects.
+    t = FetchFromSpans();
+  }
+  return t;
+}
+#+END_SRC
+
+#+BEGIN_SRC cpp
+// Fetch memory from the system and add to the central cache freelist.
+void CentralFreeList::Populate() {
+  // Release central list lock while operating on pageheap
+  lock_.Unlock();
+  // 获取该类别对应的需要从PH获取的page数量.具体数值可以参考上面slots分类的数据.
+  const size_t npages = Static::sizemap()->class_to_pages(size_class_);
+
+  Span* span;
+  {
+    SpinLockHolder h(Static::pageheap_lock());
+    // 从PH 获取npages
+    span = Static::pageheap()->New(npages);
+    // 将这个span与该类别在PH中对应起来.
+    if (span) Static::pageheap()->RegisterSizeClass(span, size_class_);
+  }
+  if (span == NULL) {
+    Log(kLog, __FILE__, __LINE__,
+        "tcmalloc: allocation failed", npages << kPageShift);
+    lock_.Lock();
+    return;
+  }
+  ASSERT(span->length == npages);
+  // Cache sizeclass info eagerly.  Locking is not necessary.
+  // (Instead of being eager, we could just replace any stale info
+  // about this span, but that seems to be no better in practice.)
+  for (int i = 0; i < npages; i++) {
+    // 将pages的信息和对应的size_class 注册到PH中的hash表中, 也就是PageMapCache
+    Static::pageheap()->CacheSizeClass(span->start + i, size_class_);
+  }
+
+  // Split the block into pieces and add to the free-list
+  // TODO: coloring of objects to avoid cache conflicts?
+  // 分割该span中objects到当前的free-list中.
+  void** tail = &span->objects;
+  char* ptr = reinterpret_cast<char*>(span->start << kPageShift);
+  char* limit = ptr + (npages << kPageShift);
+  const size_t size = Static::sizemap()->ByteSizeForClass(size_class_);
+  int num = 0;
+  while (ptr + size <= limit) {
+    *tail = ptr;
+    tail = reinterpret_cast<void**>(ptr);
+    ptr += size;
+    num++;
+  }
+  ASSERT(ptr <= limit);
+  *tail = NULL;
+  span->refcount = 0; // No sub-object in use yet
+
+  // Add span to list of non-empty spans
+  lock_.Lock();
+  // 将该span添加到noneempty列表中.
+  tcmalloc::DLL_Prepend(&nonempty_, span);
+  ++num_spans_;
+  counter_ += num;
+}
+#+END_SRC
+
+#+BEGIN_SRC cpp
+void* CentralFreeList::FetchFromSpans() {
+  // 检查nonempty list, 如果为空,意味着没有空闲的span.
+  if (tcmalloc::DLL_IsEmpty(&nonempty_)) return NULL;
+  Span* span = nonempty_.next;
+
+  ASSERT(span->objects != NULL);
+  // span的refcount 指向被使用次数. 每一次被分配内存,引用++, 释放时引用--. 
+  // 在释放时,如果refcount为0, 就会释放给PH.
+  span->refcount++;
+  void* result = span->objects;
+  // 加入到链表
+  span->objects = *(reinterpret_cast<void**>(result));
+  if (span->objects == NULL) {
+    // Move to empty list
+    tcmalloc::DLL_Remove(span);
+    tcmalloc::DLL_Prepend(&empty_, span);
+    Event(span, 'E', 0);
+  }
+  counter_--;
+  return result;
+}
+#+END_SRC
+
+下面,我们看下PH的内存分配, 也就是PageHeap::New(Length n)的逻辑.
+
+#+BEGIN_SRC cpp
+Span* PageHeap::New(Length n) {
+  ASSERT(Check());
+  ASSERT(n > 0);
+
+  // 搜索span规则.
+  Span* result = SearchFreeAndLargeLists(n);
+  if (result != NULL)
+    return result;
+
+  // ...
+
+  // 增长内存, 实际是执行系统调用
+  // Grow the heap and try again.
+  if (!GrowHeap(n)) {
+    ASSERT(Check());
+    return NULL;
+  }
+  return SearchFreeAndLargeLists(n);
+}
+#+END_SRC
+
+#+BEGIN_SRC cpp
+Span* PageHeap::SearchFreeAndLargeLists(Length n) {
+  ASSERT(Check());
+  ASSERT(n > 0);
+
+  // Find first size >= n that has a non-empty list
+  // 从n开始查找,寻找第一个非空的链表.
+  for (Length s = n; s < kMaxPages; s++) {
+    Span* ll = &free_[s].normal;
+    // If we're lucky, ll is non-empty, meaning it has a suitable span.
+    if (!DLL_IsEmpty(ll)) {
+      ASSERT(ll->next->location == Span::ON_NORMAL_FREELIST);
+      // 找到, 然后,我们尝试分割.
+      return Carve(ll->next, n);
+    }
+    // Alternatively, maybe there's a usable returned span.
+    // TODO:  returned 到底是什么东西????
+    ll = &free_[s].returned;
+    if (!DLL_IsEmpty(ll)) {
+      // We did not call EnsureLimit before, to avoid releasing the span
+      // that will be taken immediately back.
+      // Calling EnsureLimit here is not very expensive, as it fails only if
+      // there is no more normal spans (and it fails efficiently)
+      // or SystemRelease does not work (there is probably no returned spans).
+      if (EnsureLimit(n)) {
+        // ll may have became empty due to coalescing
+        if (!DLL_IsEmpty(ll)) {
+          ASSERT(ll->next->location == Span::ON_RETURNED_FREELIST);
+          return Carve(ll->next, n);
+        }
+      }
+    }
+  }
+  // No luck in free lists, our last chance is in a larger class.
+  // 这是个不幸的消息,我们只能搜索最后一个large_ 链表.
+  return AllocLarge(n);  // May be NULL
+}
+#+END_SRC
+
+我们来看下分割的行为.跟dlmalloc分割内存一样的. 都是将剩下的重新插入到
+对应的分区中.
+
+#+BEGIN_SRC cpp
+Span* PageHeap::Carve(Span* span, Length n) {
+  ASSERT(n > 0);
+  ASSERT(span->location != Span::IN_USE);
+  const int old_location = span->location;
+  // 从链表中移除.
+  RemoveFromFreeList(span);
+  span->location = Span::IN_USE;
+  Event(span, 'A', n);
+
+  const int extra = span->length - n;
+  ASSERT(extra >= 0);
+  if (extra > 0) {
+    // 将剩余部分生成新的span
+    Span* leftover = NewSpan(span->start + n, extra);
+    leftover->location = old_location;
+    Event(leftover, 'S', extra);
+    RecordSpan(leftover);
+    // 插入对应的list
+    PrependToFreeList(leftover);
+    span->length = n;
+    // 将span的地址区域和span的守地址在radix tree中对应起来.
+    pagemap_.set(span->start + n - 1, span);
+  }
+  ASSERT(Check());
+  return span;
+}
+#+END_SRC
 
 ***** CC 向PH 释放内存
       CC向PH释放内存的条件是, slots满,并且span中objects全部回收
