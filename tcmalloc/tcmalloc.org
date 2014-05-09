@@ -12,14 +12,14 @@
 
 *** overview
 
-    [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/tcmalloc.png]]
+    [[file:tcmalloc.png]]
 
-    tcmalloc为每一个线程分配一个线程本地缓存(Thread Cache)．所有小对象
+    tcmalloc为每一个线程分配一个线程本地缓存(Thread Cache, 以下简称TC)．所有小对象
     (<256K)都会优先从Thread Cache分配．而当Thread Cache没有足够空闲内
-    存时，就会从Central Heap申请内存. 而当Thread Cache内存富裕时,会将
-    内存返回给Central Heap. Central Heap 是以进程为单位存在,Thread
+    存时，就会从Central Cache(以下简称CC)申请内存. 而当Thread Cache内存富裕时,会将
+    内存返回给Central Cache. Central Cache 是以进程为单位存在,Thread
     Cache是以线程为单位存在.
-    对于大内存(>256K), 直接从Page Heap 按页对齐(4K)申请.
+    对于大内存(>256K), 直接从Page Heap (以下简称PH)按页对齐(4K)申请.
     通常情况下, 一连串的页面(4k)可以多个小内存序列,每个序列元素等大小.
     TC, CC, PH 的关系是, TC 向CC申请内存并GC给CC. CC 向PH 申请内存并GC
     给PH.
@@ -34,7 +34,7 @@
     spans对象.所有移动的数据的大小和TC中的最大大小都是在动态调整的.
 
 *** 小对象内存分配
-    [[https://raw.githubusercontent.com/pengzhangdev/documents/master/tcmalloc/threadheap.gif]]
+    [[file:threadheap.gif]]
 
     上图为小内存管理时的sizemap分类的示意图.小内存的管理都处于
     ThreadCache中.所有对于256k以下的内存申请都是从TC中获取.
@@ -137,8 +137,8 @@ struct Span {
       TC只有在其对应的分类中,不存在空闲块时,才会向CC的对应分类申请
       batch_size的空闲块.
       + 根据当前请求的内存,找到对应的分类,和该分类下的默认向CC请求的对
-        象个数(batch_size). 在该分类free list的最大长度和batch_size中
-        取最小值为需要申请的对象个数(num_to_move).
+        象个数(batch\_size). 在该分类free list的最大长度和batch\_size中
+        取最小值为需要申请的对象个数(num\_to\_move).
       + 基于慢启动算法,缓慢增加当前分类的free list容量.
       + 从CC的对应分类中的slots对像,获取相应数量的objects.
       + 如果slots不满足,则从spans对象中获取相应的objects.
@@ -271,6 +271,17 @@ inline void* ThreadCache::Allocate(size_t size, size_t cl) {
       大量请求,要么是由于请求的内存很大,导致默认值小,所以,这个时候,可以
       每次增加默认值大小.但最大移动数依然时默认的移动数.
 
+#+BEGIN_EXAMPLE
+// slow-start 
+        (set batch_size num_to_move)
+        (set list_length get_list_length_max_length)
+        (fetch-mem (min batch_size list_length))
+        (set-list-max-length 
+                (if (< list_length batch_size)
+                       (+ list_length 1)
+                      (+ list_length batch_size)))
+#+END_EXAMPLE
+
 #+BEGIN_SRC cpp
 // Remove some objects of class "cl" from central cache and add to thread heap.
 // On success, return the first object for immediate use; otherwise return NULL.
@@ -374,12 +385,12 @@ int SizeMap::NumMoveSize(size_t size) {
       + 如果list length < batch\_size , 则清空链表. 这种情况下,只有非频
         繁内存请求,才会length < batch\_size, 所以, 在时间和空间上,考虑
         优先空间,释放内存.
-      + 如果list length > batch\_size, 则释放batch_size个object.并且减
+      + 如果list length > batch\_size, 则释放batch\_size个object.并且减
         少list的max length, 尽可能利用慢启动, 减少空间浪费的问题.
 
       Scavenge回收内存规则:
-      + 遍历TC中所有的free list, 将lowwatermark > 0 的list 释放
-        lowwatermark / 2 个objects.
+      + 遍历TC中所有的free list, 将(lowwatermark > 0)的list 释放
+        (lowwatermark / 2 )个objects.
       + 如果lowwatermark > 0的list length > batch\_size, 则更新
         max\_length 为 max\_length - batch\_size, 利用慢启动算法,减慢内存增长的速度.
       + 重置所有list的 lowwatermark为当前的length. (lowwatermark会在
@@ -550,7 +561,7 @@ void ThreadCache::IncreaseCacheLimitLocked() {
       sbrk或者mmap分配的.同样, 大内存也是从PH分配的,所以,它很复杂!
 
       PH的分类,是按page数量进行. free\_ 从 0 - kMaxPages, 每个数组成员
-      包含数组下标个pages, 也就是free\_\[1\] 包含1个page长度的Spans.每
+      包含数组下标个pages, 也就是free\_[1\] 包含1个page长度的Spans.每
       个数组成员包含2个双向环形链表normal和returned.而大于kMaxPages的
       归属到large_ 中.
 
@@ -611,11 +622,31 @@ void ThreadCache::IncreaseCacheLimitLocked() {
     + 如果pageID属于span, 则调用PageHeap::Delete(Span* span).
 
 *** 算法
-    radix tree, 基数树算法
 
 ** 代码review
 
 ** 总结
+*** tcmalloc优势
+   + 我们可以将tcmalloc中的模块与dlmalloc中作映射. CC 看成dlmalloc中小
+     内存模块, PH看成dlmalloc中的大内存模块.则tcmalloc中多了一个无锁的
+     TC模块.所以,在小内存上存在的一个优势是,可以在一定范围内无锁获取和
+     释放内存.
+   + 第一条优势的前提是,TC空间足够. 但就算空间不够的情况下, TC向CC请求
+     内存, 最多也是每2次TC请求需要加解一次锁.而CC向PH请求内存,在小内存
+     的情况下,永远不可能出现每一次CC请求触发一次PH请求.
+*** tcmalloc劣势 
+   + tcmalloc的劣势,很明显,由于存在3级内存请求,和大量内存的预分配,其初
+     始化的速度比dlmalloc慢很多. 
+   + 由于对于每个线程存在TC, 空间浪费相对dlmalloc会多一些.虽然存在各种
+     算法和优化了tcmalloc中数据块的结构,但在线程数多和内存请求次数大的
+     情况下,依然不可避免地在TC中浪费了内存.
+   + 内存碎片率高. 属于个人理解.在tcmalloc中,只对相连的pages(spans)进
+     行合并,而pages的单位为4K, 相当于,这个page中只要存在被使用的内存,
+     就永远不会与前后的page进行合并. 而在dlmalloc中,存在边界标记法,任
+     何一个释放的内存块(任意大小),只要其相连块有空闲,则进行合并.
+
+
+** 对mem测试的数据总结
    + 对图表的几个说明:
      + 图表是在线程数为4的基础上做的测试. 并且是在连续分配一定次数的内
        存后再连续释放,数据只能从一定程度上反映了tcmalloc与dlmalloc的性
