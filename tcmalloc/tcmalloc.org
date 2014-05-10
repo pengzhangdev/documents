@@ -58,7 +58,7 @@
 
       + 将请求内存向上对其到size class.
       + 从对应size class中查找空闲内存, 如果存在,直接返回.
-      + 如果size class中无空闲内存,则触发向TC请求内存的机制.
+      + 如果size class中无空闲内存,则触发向CC请求内存的机制.
 
 ***** 进程向TC释放内存
 
@@ -758,7 +758,7 @@ Span* PageHeap::SearchFreeAndLargeLists(Length n) {
       return Carve(ll->next, n);
     }
     // Alternatively, maybe there's a usable returned span.
-    // TODO:  returned 到底是什么东西????
+    // returned 是通过madvice释放的内存.
     ll = &free_[s].returned;
     if (!DLL_IsEmpty(ll)) {
       // We did not call EnsureLimit before, to avoid releasing the span
@@ -778,6 +778,78 @@ Span* PageHeap::SearchFreeAndLargeLists(Length n) {
   // No luck in free lists, our last chance is in a larger class.
   // 这是个不幸的消息,我们只能搜索最后一个large_ 链表.
   return AllocLarge(n);  // May be NULL
+}
+#+END_SRC
+
+由于large\_ 中的对象没有排序,所以,需要遍历所有,不停地匹配. 这个操作费
+时,但基本上逻辑进到这里的几率不高.这里会检查PH的容量,并执行可能需要的
+内存释放.
+
+#+BEGIN_SRC cpp
+Span* PageHeap::AllocLarge(Length n) {
+  // find the best span (closest to n in size).
+  // The following loops implements address-ordered best-fit.
+  Span *best = NULL;
+
+  
+  搜索normal list
+  for (Span* span = large_.normal.next;
+       span != &large_.normal;
+       span = span->next) {
+    if (span->length >= n) {
+      if ((best == NULL)
+          || (span->length < best->length)
+          || ((span->length == best->length) && (span->start < best->start))) {
+        best = span;
+        ASSERT(best->location == Span::ON_NORMAL_FREELIST);
+      }
+    }
+  }
+
+  Span *bestNormal = best;
+
+  // 搜索returned list.
+  for (Span* span = large_.returned.next;
+       span != &large_.returned;
+       span = span->next) {
+    if (span->length >= n) {
+      if ((best == NULL)
+          || (span->length < best->length)
+          || ((span->length == best->length) && (span->start < best->start))) {
+        best = span;
+        ASSERT(best->location == Span::ON_RETURNED_FREELIST);
+      }
+    }
+  }
+
+  // best来自normal
+  if (best == bestNormal) {
+    return best == NULL ? NULL : Carve(best, n);
+  }
+
+
+  // best 来自returned, 我们如果取回best,需要判断PH是否达到容量上限.
+  // 只是检查.
+  // true 为未达到上限.参数false表示,达到上限,不释放内存.
+  if (EnsureLimit(n, false)) {
+    return Carve(best, n);
+  }
+
+  // 容量上限,释放内存.
+  // 释放内存的逻辑与TC的类似,从每个list中释放一部分.
+  // 最后调用TCMalloc_SystemRelease 进行madvise释放.
+  // 系统必须支持madvise, 否则tcmalloc无法工作.
+  if (EnsureLimit(n, true)) {
+    // best could have been destroyed by coalescing.
+    // bestNormal is not a best-fit, and it could be destroyed as well.
+    // We retry, the limit is already ensured:
+    return AllocLarge(n);
+  }
+
+  // If bestNormal existed, EnsureLimit would succeeded:
+  ASSERT(bestNormal == NULL);
+  // We are not allowed to take best from returned list.
+  return NULL;
 }
 #+END_SRC
 
@@ -813,6 +885,94 @@ Span* PageHeap::Carve(Span* span, Length n) {
 }
 #+END_SRC
 
+然后我们看下GrowHeap, 是如何从系统获取内存的
+
+#+BEGIN_SRC cpp
+bool PageHeap::GrowHeap(Length n) {
+  ASSERT(kMaxPages >= kMinSystemAlloc);
+  if (n > kMaxValidPages) return false;
+  // 判断需要请求的page数量.
+  Length ask = (n>kMinSystemAlloc) ? n : static_cast<Length>(kMinSystemAlloc);
+  size_t actual_size;
+  void* ptr = NULL;
+
+  // 确定添加ask的数量后,没有达到容量要求
+  if (EnsureLimit(ask)) {
+      ptr = TCMalloc_SystemAlloc(ask << kPageShift, &actual_size, kPageSize);
+  }
+  if (ptr == NULL) {
+    if (n < ask) {
+      // Try growing just "n" pages
+      ask = n;
+      if (EnsureLimit(ask)) {
+        ptr = TCMalloc_SystemAlloc(ask << kPageShift, &actual_size, kPageSize);
+      }
+    }
+    if (ptr == NULL) return false;
+  }
+  ask = actual_size >> kPageShift;
+  RecordGrowth(ask << kPageShift);
+
+  // 记录系统已经分配的page数量.
+  uint64_t old_system_bytes = stats_.system_bytes;
+  stats_.system_bytes += (ask << kPageShift);
+  const PageID p = reinterpret_cast<uintptr_t>(ptr) >> kPageShift;
+  ASSERT(p > 0);
+
+  // If we have already a lot of pages allocated, just pre allocate a bunch of
+  // memory for the page map. This prevents fragmentation by pagemap metadata
+  // when a program keeps allocating and freeing large blocks.
+  if (old_system_bytes < kPageMapBigAllocationThreshold
+      && stats_.system_bytes >= kPageMapBigAllocationThreshold) {
+    pagemap_.PreallocateMoreMemory();
+  }
+
+  // Make sure pagemap_ has entries for all of the new pages.
+  // Plus ensure one before and one after so coalescing code
+  // does not need bounds-checking.
+  // 与前一个合并,如果前一个是空闲的话.
+  if (pagemap_.Ensure(p-1, ask+2)) {
+    // Pretend the new area is allocated and then Delete() it to cause
+    // any necessary coalescing to occur.
+    Span* span = NewSpan(p, ask);
+    RecordSpan(span);
+    Delete(span);
+    ASSERT(Check());
+    return true;
+  } else {
+    // We could not allocate memory within "pagemap_"
+    // TODO: Once we can return memory to the system, return the new span
+    return false;
+  }
+}
+#+END_SRC
+
+然后,就是跟系统互动的TCMalloc_SystemAlloc.其中有两个allocator, mmap和
+sbrk.
+它会遍历所有的allocs, 直到能成功分配内存.在我们的系统上,先尝试sbrk,然
+后才是mmap.
+
+#+BEGIN_SRC cpp
+void* DefaultSysAllocator::Alloc(size_t size, size_t *actual_size,
+                                 size_t alignment) {
+  for (int i = 0; i < kMaxAllocators; i++) {
+    if (!failed_[i] && allocs_[i] != NULL) {
+      void* result = allocs_[i]->Alloc(size, actual_size, alignment);
+      if (result != NULL) {
+        return result;
+      }
+      failed_[i] = true;
+    }
+  }
+  // After both failed, reset "failed_" to false so that a single failed
+  // allocation won't make the allocator never work again.
+  for (int i = 0; i < kMaxAllocators; i++) {
+    failed_[i] = false;
+  }
+  return NULL;
+}
+#+END_SRC
+
 ***** CC 向PH 释放内存
       CC向PH释放内存的条件是, slots满,并且span中objects全部回收
       (refcount为0).
@@ -823,6 +983,154 @@ Span* PageHeap::Carve(Span* span, Length n) {
       + 将合并后的新span或者不需要合并的span插入对应的free list中.
       + PageHeap检查是否需要释放内存到系统.这里释放的机制与TC释放的机
         制有点不同,不会针对某个分类大小进行释放,而是针对整个PH进行释放.
+
+#+BEGIN_SRC cpp
+void PageHeap::Delete(Span* span) {
+  ASSERT(Check());
+  ASSERT(span->location == Span::IN_USE);
+  ASSERT(span->length > 0);
+  ASSERT(GetDescriptor(span->start) == span);
+  ASSERT(GetDescriptor(span->start + span->length - 1) == span);
+  const Length n = span->length;
+  span->sizeclass = 0;
+  span->sample = 0;
+  // 设置为在normal list
+  span->location = Span::ON_NORMAL_FREELIST;
+  Event(span, 'D', span->length);
+  // 与前后合并
+  MergeIntoFreeList(span);  // Coalesces if possible
+  // 内存释放的逻辑.
+  IncrementalScavenge(n);
+  ASSERT(Check());
+}
+#+END_SRC
+
+首先我们看下合并的逻辑. 跟dlmalloc其实没差. 即使根据span的获取到对应的
+pageID,然后查找(pageID - 1) 的page和(pageID +１)的page,如果都为空闲,合
+并.
+
+#+BEGIN_SRC cpp
+void PageHeap::MergeIntoFreeList(Span* span) {
+  ASSERT(span->location != Span::IN_USE);
+
+  const PageID p = span->start;
+  const Length n = span->length;
+  // GetDescriptor 就是通过pagemap, 将pageID映射成span的地址.
+  Span* prev = GetDescriptor(p-1);
+  // 这里的location, 不是跟地址相关的,而是表示这个span存在的list(normal or returned)
+  // 这里是保证, normal中的span不会和returned中的span进行合并.
+  if (prev != NULL && prev->location == span->location) {
+    // Merge preceding span into this span
+    ASSERT(prev->start + prev->length == p);
+    const Length len = prev->length;
+    // 将上一个span从队列移除
+    RemoveFromFreeList(prev);
+    // 删除span对象
+    DeleteSpan(prev);
+    // 合并首地址
+    span->start -= len;
+    // 合并长度
+    span->length += len;
+    // 将新span的pageID和span的地址在pagemap中进行映射
+    pagemap_.set(span->start, span);
+    Event(span, 'L', len);
+  }
+  // same as above
+  Span* next = GetDescriptor(p+n);
+  if (next != NULL && next->location == span->location) {
+    // Merge next span into this span
+    ASSERT(next->start == p+n);
+    const Length len = next->length;
+    RemoveFromFreeList(next);
+    DeleteSpan(next);
+    span->length += len;
+    pagemap_.set(span->start + span->length - 1, span);
+    Event(span, 'R', len);
+  }
+
+  // 重新将生成的span插入相应的list中.
+  PrependToFreeList(span);
+}
+#+END_SRC
+
+下面,我们看下增量释放函数IncrementalScavenge.它不是每次都进行内存释放.当
+某此内存未释放的情况下,会等待一段时间. 所以,PH的容量是允许超过的.
+
+#+BEGIN_SRC cpp
+void PageHeap::IncrementalScavenge(Length n) {
+  // Fast path; not yet time to release memory
+  // scaveng_counter_ 是一个超时计数,单位为page数.
+  scavenge_counter_ -= n;
+  if (scavenge_counter_ >= 0) return;  // Not yet time to scavenge
+
+  // 回收率, 如果过低,则不回收
+  const double rate = FLAGS_tcmalloc_release_rate;
+  if (rate <= 1e-6) {
+    // Tiny release rate means that releasing is disabled.
+    scavenge_counter_ = kDefaultReleaseDelay;
+    return;
+  }
+
+  // 尝试释放一个页面, 实际上是以span为单位释放. 也就是说,
+  // 页面数会对齐到一个span中,然后释放该span.
+  Length released_pages = ReleaseAtLeastNPages(1);
+
+  // 实际没归还,则等待默认长度.
+  // 没归还的原因是, 系统不支持madvise或者内存释放失败.
+  if (released_pages == 0) {
+    // Nothing to scavenge, delay for a while.
+    // kDefaultReleaseDelay = 1 << 18; 基本等于是不再释放内存.
+    scavenge_counter_ = kDefaultReleaseDelay;
+  } else {
+    // Compute how long to wait until we return memory.
+    // FLAGS_tcmalloc_release_rate==1 means wait for 1000 pages
+    // after releasing one page.
+    // 释放成功,则计算下一次等待时间.
+    const double mult = 1000.0 / rate;
+    double wait = mult * static_cast<double>(released_pages);
+    if (wait > kMaxReleaseDelay) {
+      // Avoid overflow and bound to reasonable range.
+      wait = kMaxReleaseDelay;
+    }
+    scavenge_counter_ = static_cast<int64_t>(wait);
+  }
+}
+#+END_SRC
+
+我们看下ReleaseAtLeastNPages, 这东西释放的单位为span, 所以,传入的参数,
+page数量,实际上是指最小需要释放长度,达到了或者没有可释放的span,则停止,
+否则,持续释放.
+
+#+BEGIN_SRC cpp
+Length PageHeap::ReleaseAtLeastNPages(Length num_pages) {
+  Length released_pages = 0;
+
+  // Round robin through the lists of free spans, releasing the last
+  // span in each list.  Stop after releasing at least num_pages
+  // or when there is nothing more to release.
+  while (released_pages < num_pages && stats_.free_bytes > 0) {
+    for (int i = 0; i < kMaxPages+1 && released_pages < num_pages;
+         i++, release_index_++) {
+      if (release_index_ > kMaxPages) release_index_ = 0;
+      SpanList* slist = (release_index_ == kMaxPages) ?
+          &large_ : &free_[release_index_];
+      if (!DLL_IsEmpty(&slist->normal)) {
+        // 获取normal非空的list, 释放其最后一个span.
+        Length released_len = ReleaseLastNormalSpan(slist);
+        // Some systems do not support release
+        if (released_len == 0) return released_pages;
+        released_pages += released_len;
+      }
+    }
+  }
+  return released_pages;
+}
+#+END_SRC
+
+在ReleaseLastNormalSpan中,就是取出list中最后一个span, 调用
+TCMalloc_SystemRelease,释放.而 TCMalloc_SystemRelease中,实际调用的是
+madvise实现.
+
 
 *** 大对象内存分配
     在分析小内存时,在请求内存数 > kMaxSize(256k)时, 则执行大内存分配.大
@@ -943,7 +1251,7 @@ extern "C" PERFTOOLS_DLL_DECL void tc_delete(void* p) __THROW
 
    真正分配内存的函数是do_malloc函数.
 
-*** tc_malloc
+*** 初始化
 
 #+BEGIN_SRC cpp
 // line: 1577 file: /root/git/gperftools/src/tcmalloc.cc
