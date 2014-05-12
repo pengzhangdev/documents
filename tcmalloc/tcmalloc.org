@@ -1169,6 +1169,11 @@ madvise实现.
 
 
 ** 对mem测试的数据总结
+
+[[file:dlmalloc-tcmalloc0.png]]
+
+[[file:dlmalloc-tcmalloc1.png]]
+
    + 对图表的几个说明:
      + 图表是在线程数为4的基础上做的测试. 并且是在连续分配一定次数的内
        存后再连续释放,数据只能从一定程度上反映了tcmalloc与dlmalloc的性

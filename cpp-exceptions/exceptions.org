@@ -1,3 +1,6 @@
+#+AUTHOR:    Peng Zhang
+#+EMAIL:     pengzhangdev@gmail.com
+
 * gcc的异常处理实现原理
 
 ** overview
@@ -9,7 +12,7 @@
 
 ** throw的实现
    一般的throw代码如下. 抛出一个异常对象. 所以, 首先throw需要分配内存
-   用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数\_\_cxa_allocate_exception实现,这
+   用于存放该异常对象,然后再根据这个异常,寻找对应的handler.在g++中,是由函数\_\_cxa\_allocate\_exception实现,这
    个函数在libstdc++中可以找到.而执行例外handler的检索的动作
    由\_\_cxa\_throw 实现.换句话说, throw 实际是调用到\_\_cxa\_throw 函数.
 #+BEGIN_SRC cpp
@@ -154,22 +157,24 @@ PR这个函数的主要功能就是查找是否有满足需求的handler, 和堆
 
 **** stack unwind
      stack unwind 的主要功能是,在异常处理完成后,能够安全地析构生命周期
-     结束的所有资源.利用上面的两个section, 在throw(\_\_cxx_throw)抛出时,
+     结束的所有资源.利用上面的两个section, 在throw(\_\_cxx\_throw)抛出时,
      触发\_Unwind\_RaiseException 函数调用,在这个函数中除了基本的寄存器
      状态保存和恢复外,还执行了堆栈的回退查找,用户查找调用者的异常处理,
      第一阶段如下(沙盒模式):
      1. 保存寄存器状态,并将返回的地址从r14 拷贝到 r15.
      2. 在.ARM.exidx 中查找地址匹配r15中地址的项.如果没找到,或者值是
-        EXIDX_CANTUNWIND,则在终止异常抛出.
+        EXIDX\_CANTUNWIND,则在终止异常抛出.
      3. 如果找到了,则执行一些基本的初始化,并执行对应personality
         routine(PR)函数.
      4. PR函数测试该entry是否能处理该异常. 有三个返回状态:
-        _URC_HANDLER_FOUND(找到异常处理函数), \_URC\_CONTINUE\_UNWIND(针
+        \_URC\_HANDLER\_FOUND(找到异常处理函数), \_URC\_CONTINUE\_UNWIND(针
         对当前函数继续从1 开始执行,查找调用者函数能否处
         理),\_URC\_FAILURE(返回异常抛出者,失败).
 
      第二阶段如下:
-     1 2 和 第一阶段 1 2 一样.
+     1. 保存寄存器状态,并将返回的地址从r14 拷贝到 r15.
+     2. 在.ARM.exidx 中查找地址匹配r15中地址的项.如果没找到,或者值是
+        EXIDX\_CANTUNWIND,则在终止异常抛出.
      3. 执行PR,检查该handler,确认下一步该做什么.
      4. PR检测handler时,返回三个状态: \_URC\_FAILURE(直接调用abort(), 无
         法还原了), \_URC\_CONTINUE\_UNWIND(该栈帧已经被处理过了??清理过
