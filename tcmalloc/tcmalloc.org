@@ -138,7 +138,7 @@ struct Span {
 
 ***** TC向CC请求内存
       TC只有在其对应的分类中,不存在空闲块时,才会向CC的对应分类申请
-      batch_size的空闲块.
+      batch\_size的空闲块.
       + 根据当前请求的内存,找到对应的分类,和该分类下的默认向CC请求的对
         象个数(batch\_size). 在该分类free list的最大长度和batch\_size中
         取最小值为需要申请的对象个数(num\_to\_move).
@@ -403,7 +403,7 @@ int SizeMap::NumMoveSize(size_t size) {
 
       TC容量偷取:
       + 如果存在无人认领的内存(无人认领内存: 线程结束后(TC的Heap被释放)的
-        内存), 则优先从其领取需要的内存,增大当前线程的容量.
+        内存, 最大为 8u * 4 << 20), 则优先从其领取需要的内存,增大当前线程的容量.
       + 上述条件不满足,则遍历所有的TC, 如果某个TC的容量 >
         kMinThreadCacheSize (kMaxSize * 2 = 512K) , 则偷取其容量.
 
@@ -569,8 +569,8 @@ void ThreadCache::IncreaseCacheLimitLocked() {
       归属到large\_ 中.
 
       normal: 存放空闲的span list.
-      returned: 存放通过madvise的MADV_FREE 方式释放的span.前提时系统支
-      持MADV\_FREE 否则就不释放内存...
+      returned: 存放通过madvise的MADV\_FREE 方式释放的span.前提时系统支
+      持MADV\_FREE 或 MADV\_DONTNEED 否则就不释放内存.
 
       所谓madvise的MADV\_FREE 释放内存, 是内核实现的一种lazy free方式.
       在process通过madvise MADV\_FREE 方式通知kernel, 某段pages中的数据
@@ -587,7 +587,7 @@ void ThreadCache::IncreaseCacheLimitLocked() {
 
       对于span, span中objects的地址和 span的PageID之间, 在PH中存在相应的算法进
       行映射. PageMap 是一个基数树(radix tree), 能将某个地址映射到对应
-      的span. 而PageMapCache能将对应的PageId映射到其size class.
+      的span. 而PageMapCache是HashTable能将对应的PageId映射到其size class.
 
 #+BEGIN_SRC cpp
   // We segregate spans of a given size into two circular linked
@@ -1128,7 +1128,7 @@ Length PageHeap::ReleaseAtLeastNPages(Length num_pages) {
 #+END_SRC
 
 在ReleaseLastNormalSpan中,就是取出list中最后一个span, 调用
-TCMalloc_SystemRelease,释放.而 TCMalloc_SystemRelease中,实际调用的是
+TCMalloc\_SystemRelease,释放.而 TCMalloc\_SystemRelease中,实际调用的是
 madvise实现.
 
 
@@ -1249,7 +1249,7 @@ extern "C" PERFTOOLS_DLL_DECL void* tc_new(size_t size)
 extern "C" PERFTOOLS_DLL_DECL void tc_delete(void* p) __THROW
 #+END_SRC
 
-   真正分配内存的函数是do_malloc函数.
+   真正分配内存的函数是do\_malloc函数.
 
 *** 初始化
 
@@ -1370,7 +1370,7 @@ void ThreadCache::InitModule() {
 // line:  325
 #+END_SRC
     [[InitStaticVars]]
-    [[allocator_init]]
+    [[allocator\_init]]
 
     #<<InitStaticVars>>
 #+BEGIN_SRC cpp
@@ -1405,9 +1405,9 @@ void Static::InitStaticVars() {
 }
 // line:  102
 #+END_SRC
-    [[sizemap_init]]
+    [[sizemap\_init]]
 
-    #<<sizemap_init>>
+    #<<sizemap\_init>>
 #+BEGIN_SRC cpp
 // line:  122 file: /root/git/gperftools/src/common.cc
 void SizeMap::Init() {
@@ -1639,9 +1639,9 @@ ThreadCache* ThreadCache::NewHeap(pthread_t tid) {
 }
 // line:  414
 #+END_SRC
-    [[thread_allocator_New]]
+    [[thread\_allocator\_New]]
 
-    #<<thread_allocator_New>>
+    #<<thread\_allocator\_New>>
 #+BEGIN_SRC cpp
 // line:   62 file: /root/git/gperftools/src/page_heap_allocator.h
   T* New() {
