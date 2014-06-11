@@ -1,0 +1,35 @@
+* vm mem manage
+
+** 内存管理方式
++  marked:  底层基于无锁的dlmalloc实现.
++  Copying: 基于队列(BlockQueue)实现的内存管理.
+
+*** marked(标记法)
+**** 代码位置: android-rt/dalvik/vm/alloc/{HeapSource.cpp}
+**** 综述
+     + 每一个VM, 对应一个内存管理, 也对应一个GCDemon.
+     + 每一个内存管理, 底部的内存管理由dlmalloc的mspace相关接口接手.
+       实际的内存池空间由VM 通过mmap指定, 可以由dlmalloc动态增长.
+     + dlmalloc管理的内存池被认为底层内存池, VM自己基于该内存池封装了
+       一个上层内存池, 原因是, 需要GC进行管理, 所以必须有这么一个GC内
+       存池存在.
+**** 初始化
+     + 分配一块连续的大内存,大小为maximumSize. mmap 分配匿名空间.
+       (Misc.cpp:607)
+     + 基于mspace的机制, 创建无锁的内存池.(HeapSource.cpp:322)
+       + 修改mmap分配的第一页为可读, 该区域内存放mstate, 类似dlmalloc
+         全局变量gm, 保存所有内存池相关的信息. (mspace.c:create_contiguous_mspace_with_base:137)
+       + 调用dlmalloc的create_mspace_with_base 创建内存池, 特别指出,
+         我们不使用dlmalloc的锁保证线程安全.
+         + 初始化dlmalloc的分箱, top块, dv块等.并保存当前的内存大小
+           (footprint)为初始大小. (dlmalloc.c:init_user_mstate:4678)
+       + 在基地址和 mstate 之间存放 VM 管理的一个结构体, 保存着相关的
+         brk和top的地址.
+       + 
+
+*** Copying(拷贝法)
+**** 代码位置: android-rt/dalvik/vm/alloc/{Copying.cpp}
+**** 综述
+     + 
+     + 每一个VM管理一个内存块 队列(BlockQueue).
+     + 
