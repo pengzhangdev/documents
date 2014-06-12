@@ -25,7 +25,17 @@
            (footprint)为初始大小. (dlmalloc.c:init_user_mstate:4678)
        + 在基地址和 mstate 之间存放 VM 管理的一个结构体, 保存着相关的
          brk和top的地址.
-       + 
+       + 设置mspace中允许的最大请求数.(HeapSource.cpp:createMspace:341)
+     + 初始化GC 和HeapSource 结构体, 分别由GC程序和内存分配使用
+     + 将mspace分配获得的内存池的地址保存到HeapSource的Heap成员中.
+       HeapSource 保存2个Heap.
+     + 初始化 live objects bitmap 和 mark bitmap
+       这两个 bitmap 都是以 (8 * 8 * 8) 为粒度, 对HeapSource支持的最
+       大内存进行管理
+     + 为GC结构体分配mark stack, 该对象保存GC运行时的那一时刻的mark
+       bitmap信息,用于记录内存回收过程中的信息. 所以, 在分配完成后立即
+       使用madvise 将内存返回给kernel, 从而节省内存.
+
 
 *** Copying(拷贝法)
 **** 代码位置: android-rt/dalvik/vm/alloc/{Copying.cpp}
@@ -33,3 +43,7 @@
      + 
      + 每一个VM管理一个内存块 队列(BlockQueue).
      + 
+
+
+[[http://www.phonesdevelopers.com/1708168/][android dmv memory management research and analysis]]
+[[http://blog.chinaunix.net/uid-28792672-id-4137627.html][android dalvik heap 简单分析]]
