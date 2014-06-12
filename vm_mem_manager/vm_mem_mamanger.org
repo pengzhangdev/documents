@@ -30,11 +30,31 @@
      + 将mspace分配获得的内存池的地址保存到HeapSource的Heap成员中.
        HeapSource 保存2个Heap.
      + 初始化 live objects bitmap 和 mark bitmap
-       这两个 bitmap 都是以 (8 * 8 * 8) 为粒度, 对HeapSource支持的最
-       大内存进行管理
+       这两个 bitmap 都是以 (8) 为粒度, 对HeapSource支持的最
+       大内存进行管理. 也就是说每个bit位管理8byte的空间.
      + 为GC结构体分配mark stack, 该对象保存GC运行时的那一时刻的mark
        bitmap信息,用于记录内存回收过程中的信息. 所以, 在分配完成后立即
        使用madvise 将内存返回给kernel, 从而节省内存.
+
+     need a pic to show process above
+
+**** 内存分配
+     + 入口函数位dvmAllocObject, 在java层调用new进行对象内存分配时,就
+       调用到该点.(Alloc.cpp:dvmAllocObject::181)
+     + 调用dvmMalloc, 实际上是向GC管理的HeapSource申请内
+       存.(Heap.cpp:dvmMalloc:439)
+       + 加锁! 
+       + 尝试内存分配tryMalloc, 在这里面会做多次尝试.
+         (Heap.cpp:tryMalloc:230)
+         + 人品不好,请求size > growthLimit, 则请求GC后再次尝试申请吧.GC操
+           作请看后文
+         + 尝试从HeapSource申请内存.
+           (HeapSource.cpp:dvmHeapSourceAlloc:871)
+           + 从HeapSource 获取 用于分配内存的Heap
+           + 如果Heap已经满了, 则拒绝分配. 依据: byteAllocate + n >
+             softLimit ?
+           + 调用dlmalloc中的mspace_calloc 进行内存分配.
+           + 
 
 
 *** Copying(拷贝法)
