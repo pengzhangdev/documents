@@ -1,0 +1,49 @@
+* on lisp
+
+** chapter 2
+
+*** 2.6 闭包
+    由于 Common lisp  词法作用域的, 所以在定义一个函数时需要同时绑定函
+    数中保存的那些变量, 我们将这种 函数和一组变量的组合称为闭包.
+
+    对于闭包中的保存变量,我们也是由办法进行改变的.
+#+BEGIN_SRC lisp
+        (defun make-adderb (n)
+          #'(lambda (x &optional change)
+               (if change
+                   (setq n x)
+                   (+ x n))))
+
+(setq addx (make-adderb 1))     ;; => #<CLOSURE (LAMBDA (X &OPTIONAL CHANGE) :IN MAKE-ADDERB) {10050EFE5B}>
+(funcall addx 100 t)            ;; => 100
+(funcall addx 3)                ;; => 103
+#+END_SRC
+
+    我们也可以利用闭包实现对同一个共享对象的访问.
+
+#+BEGIN_SRC lisp
+;; 返回操作同一个db数据库的操作函数列表
+(defun make-dbms (db)
+  (list
+   #'(lambda (key)
+       (cdr (assoc key db)))
+   #'(lambda (key val)
+       (push (cons key val) db)
+       key)
+   #'(lambda (key)
+       (setf db (delete key db :key #'car))
+       key)))
+#+END_SRC
+
+*** 2.7 局部函数
+
+    我们用lambda表达式实现的匿名函数, 却无法做到匿名函数递归的问题, 这
+    是 Common Lisp 中未提供的, 相对于其他的 lisp 方言 (scheme) . 所以,
+    Common Lisp 中提供了局部函数的功能 类似 let 的功能.
+
+#+BEGIN_SRC lisp
+(labels ((inc (x) (1+ x)))
+  (inc 3))
+#+EDN_SRC
+
+
