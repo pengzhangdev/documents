@@ -44,10 +44,11 @@
 #+BEGIN_SRC lisp
 (labels ((inc (x) (1+ x)))
   (inc 3))
-#+EDN_SRC
+#+END_SRC
 
     let 和 label 有一个本质的区别是， 在 let 里， 你不能期待一个变量依
     赖于同一个 let 中生成的另一个变量，如下：
+
 
 #+BEGIN_SRC lisp
 ;; 错误的， 必须使用 let*
