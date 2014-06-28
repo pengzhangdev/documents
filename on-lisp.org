@@ -46,4 +46,164 @@
   (inc 3))
 #+EDN_SRC
 
+    let 和 label 有一个本质的区别是， 在 let 里， 你不能期待一个变量依
+    赖于同一个 let 中生成的另一个变量，如下：
+
+#+BEGIN_SRC lisp
+;; 错误的， 必须使用 let*
+(let ((x 10) (y x))
+  y)
+
+;; 正确的
+(let* ((x 10) (y x))
+  y)
+#+END_SRC
+
+
+*** 2.8 尾递归
+
+    如果递归函数在调用它自身后没有其他事情可做，则这种调用称为尾递归。
+    一个非尾递归的函数通常可以通过嵌入一个使用累积器的本地函数，被转换
+    成尾递归的形式。
+
+#+BEGIN_SRC lisp
+(defun our-length (lst)
+  (labels ((rec (lst acc)
+             (if (null lst)
+                 acc
+                 (rec (cdr lst) (1+ acc)))))
+    (rec lst 0)))
+#+END_SRC
+
+    对于某些编译器而言，可能无法默认做到尾递归优化，可以通过在文件前面
+    指定下面的调用，通知编译器使用尾递归优化。
+
+#+BEGIN_SRC lisp
+(proclaim '(optimize speed))
+#+END_SRC
+
+    如果使用尾递归和类型声明， Common Lisp 就能实现速度与 C 媲美甚至超
+    越的代码。如下， 是一个例子。
+
+#+BEGIN_SRC lisp
+(defun triangle (n)
+  (labels ((tri (c n)
+             (declare (type fixnum n c))
+             (if (zerop n)
+                 c
+                 (tri (the fixnum (+ n c))
+                      (the fixnum (- n 1))))))
+    (tri 0 n)))
+#+END_SRC
+
+
+*** 2.9 编译
+
+可以使用 compiled-function-p 来判断函数是否已经编译。
+当一个函数出现在另一个函数中， 如果外面的函数已经编译， 则里面的函数也
+会被编译。
+
+内联函数的实现, 这样一个编译并调用了 50th 的函数在它的编译器就会将
+50th 的代码编译进它里面。*这样有个缺点是： 如果我们改动了 50th 函数，
+则所有相应调用该函数的函数都需要重新编译*
+
+#+BEGIN_SRC lisp
+(defun 50th (lst) (nth 49 lst))
+(proclaim '(inline 50th))
+#+END_SRC
+
+
+*** 2.10 来自列表的函数
+
+** 函数式编程
+
+本章我们将介绍在 lisp 的天地里经常使用到的编程方法。
+
+*** 3.1 函数式设计
+
+函数式编程意味着利用返回值而不是副作用来写程序。副作用 包括破坏性修改
+对象以及变量赋值 ( C 语言中的参数-值模式, 就是一种副作用, C 语言是利用
+了这种副作用的编程模式 ). 举个例子, 我们需要逆序一个列表, 在 C 语言中,
+通常的做法, 就是参数为一个列表, 直接逆序参数, 返回是否逆序成功 (
+int/bool ); 而在 lisp 中, 我们接受列表参数, 返回逆序后的列表而不修改参
+数.
+
+在一些语言中, 出现破坏性函数的原因是, 需要返回多个值, 而由于不支持多值
+返回, 所以只能通过修改参数作返回值.
+
+在 common lisp 中可以通过函数 multiple-value-bind 实现多返回值的绑定.
+
+#+BEGIN_SRC lisp
+(multiple-value-bind (int frac) (truncate 26.21875)
+  (list int frac))
+#+END_SRC
+
+而在 common lisp 中 若要实现返回多值, 只需要使用 values 函数.
+
+*** 3.2 内外颠倒的命令式
+
+函数式代码和命令式代码在某些理念上的差异:
++  函数式告诉你它想要什么, 比如 "返回一个由 a 和 x 的第一个元素的平方
+   组成的列表"
+#+BEGIN_SRC lisp
+(defun fun (x)
+  (list 'a (expt (car x) 2)))
+#+END_SRC
++  命令式则告诉你它要怎么做, 比如 "取得 x 的第一个元素, 把它平方, 然后
+   返回由 a 和那个平方所组成的列表"
+#+BEGIN_SRC lisp
+(defun imp (x)
+  (let (y sqr)
+    (setq y (car x))
+    (setq sqr (expt y 2))
+    (list 'a sqr)))
+#+END_SRC
+
+从命令式编程到函数式编程转变的一个诀窍: 认识到命令式程序其实是一个从里
+到外翻过来的函数式程序.
+
+*** 3.3 函数式接口
+
+如果某个函数修改的是其他函数所不具备的数据, 则可认为该副作用函数是无害
+的.换句话说, 我们用规则来描述, 一个给定的调用 (invocation) 可以安全地
+修改它唯一拥有的东西.
+一个函数是否是破坏性的, 可以通过一个比较简单的原则测试下, 我们连续多次
+用将同一个参数传递给同一个函数, 如果得到的结果一致, 则基本可认为该函数
+是非破坏性的.
+
+副作用函数: 是指会修改函数参数的函数.
+破坏性函数: 是指会修改归属于调用者的参数的函数.
+一个函数可以是副作用的并且非破坏性的, 因为它修改的参数不被任何其他函数
+或代码主体使用.
+
+关于参数的一个推论, 同理, 任何一个函数不能返回不可被修改的值. 也就是说,
+要避免返回那些包含引用对象的函数.
+下面的例子中, 我们看到 '(oh my) 的内容被改变成了 '(oh my goodness), 原
+因是, append 实现时, 将其余的列表, 除了最后一个, 都做了拷贝, 而最后一
+个列表, 被作为返回列表的最后一个原子的 cdr .
+
+#+BEGIN_SRC lisp
+(defun exclaim (expression)
+  (append expression '(oh my)))
+
+(exclaim '(lions and tigers and bears))
+;; => (LIONS AND TIGERS AND BEARS OH MY)
+
+(nconc * '(goodness))
+;; => (LIONS AND TIGERS AND BEARS OH MY GOODNESS)
+
+(exclaim '(fixnums and bignums and floats))
+;; => (FIXNUMS AND BIGNUMS AND FLOATS OH MY GOODNESS)
+
+
+;; correct exclaim function, create a new list to return.
+(defun exclaim (expression)
+  (append expression (list 'oh 'my)))
+#+END_SRC
+
+当然，对于"函数不应该返回引用列表"这一规则有一个主要的例外：　那些生成
+宏展开的函数，　宏展开器可以安全地在它们的展开式里包含引用的列表，　如
+果这些展开式是直接送到编译器那里的。
+
+*** 3.4 交互式编程
 
